@@ -1,50 +1,68 @@
+
 import requests
 import base64
 import os
+import traceback
 
-def describe_image(image_path, model="llava:7b-v1.5-q4_1"):
+def describe_image(image_path, model="llava:7b-v1.5-q4_1", provider="ollama", device="auto"):
     """
-    Calls the Ollama API with the specified model to describe the image at the given path.
-    Returns the model's response as a string.
+    Describe an image using either Ollama (local) or Hugging Face (local) based on provider.
+    provider: 'ollama' (default) or 'huggingface'
     """
-    prompt = "Describe the image in as much detail as possible, including objects, scene, and quality."
-
-    # prompt = (
-    #     "You are an image feature extractor. You excel at identifying objects, scenes, and image characteristics in an image. "
-    #     "Identify the general scene, objects, and the theme of this image. Also, evaluate the image for clarity, blurriness, and other imperfections that degrade the image's quality. "
-    #     "Return a structured output in the form of yaml. It should contain the following traits. "
-    #     "Subjects: List the objects that are the primary subjects in the image. "
-    #     "Scene: Describing the general setting of the image. "
-    #     "Background: Any identified objects in the background. "
-    #     "Theme: General sentiments of the overall subjects and scene, and "
-    #     "Quality: List technical good an bad qualities of the image. "
-    #     "Do not hallucinate. If you cannot read the image, say so outright."
-    # )
-
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image file not found: {image_path}")
 
-    with open(image_path, 'rb') as img_file:
-        img_bytes = img_file.read()
-        img_b64 = base64.b64encode(img_bytes).decode('utf-8')
-
-    url = "http://localhost:11434/api/generate"
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "images": [img_b64]
-    }
-    response = requests.post(url, json=payload, stream=True)
-    response.raise_for_status()
-    result = ''
-    for line in response.iter_lines():
-        if not line:
-            continue
+    if provider == "ollama":
+        prompt = "Describe the image in as much detail as possible, including objects, scene, and quality."
+        with open(image_path, 'rb') as img_file:
+            img_bytes = img_file.read()
+            img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+        url = "http://localhost:11434/api/generate"
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "images": [img_b64]
+        }
+        response = requests.post(url, json=payload, stream=True)
+        response.raise_for_status()
+        result = ''
+        for line in response.iter_lines():
+            if not line:
+                continue
+            try:
+                data = line.decode('utf-8')
+                import json
+                obj = json.loads(data)
+                result += obj.get('response', '')
+            except Exception:
+                continue
+        return result
+    elif provider == "huggingface":
         try:
-            data = line.decode('utf-8')
-            import json
-            obj = json.loads(data)
-            result += obj.get('response', '')
-        except Exception:
-            continue
-    return result
+            from transformers import pipeline
+            import torch
+            # Determine device
+            if device == "cpu":
+                device_arg = -1
+            elif device == "cuda":
+                device_arg = 0 if torch.cuda.is_available() else -1
+            else:  # auto
+                device_arg = 0 if torch.cuda.is_available() else -1
+            pipe = pipeline("image-to-text", model=model, device=device_arg)
+            result = pipe(image_path)
+            # result is a list of dicts with 'generated_text' or 'caption' keys
+            if isinstance(result, list) and result:
+                if 'generated_text' in result[0]:
+                    return result[0]['generated_text']
+                elif 'caption' in result[0]:
+                    return result[0]['caption']
+                else:
+                    return str(result[0])
+            return str(result)
+        except ImportError:
+            return "transformers library is not installed. Please install it to use Hugging Face provider."
+        except Exception as e:
+            tb = traceback.format_exc()
+            return f"Error running Hugging Face model: {e}\nTraceback:\n{tb}"
+    else:
+        return f"Unknown provider: {provider}"
