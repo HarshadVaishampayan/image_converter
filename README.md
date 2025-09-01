@@ -1,5 +1,34 @@
 # image_converter
 
+## Setup: Virtual Environment & Installing Packages
+
+1. **Create a virtual environment** (Python 3.10 recommended for GPU support):
+	```sh
+	python3.10 -m venv .venv310
+	source .venv310/bin/activate
+	```
+	Or for CPU-only / Python 3.12:
+	```sh
+	python3.12 -m venv .venv
+	source .venv/bin/activate
+	```
+
+2. **Install dependencies**
+	```sh
+	pip install --upgrade pip
+	pip install -r requirements.txt
+	# Or for specific Python versions:
+	# pip install -r requirements310.txt  # for Python 3.10 + CUDA
+	# pip install -r requirements312.txt  # for Python 3.12 (CPU-only)
+	```
+
+3. **(Optional, for GPU/CUDA users)**
+	If using Python 3.10 and an NVIDIA GPU, install PyTorch with CUDA 11.7 support:
+	```sh
+	pip install torch==2.0.1+cu117 torchvision==0.15.2+cu117 torchaudio==2.0.2+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
+	```
+
+
 ## How to Use
 
 ### 1. Image Conversion
