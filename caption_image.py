@@ -1,10 +1,11 @@
 import torch
-from transformers import BlipProcessor, BlipForConditionalGeneration
+from transformers import BlipForConditionalGeneration, BlipProcessor, InstructBlipProcessor, InstructBlipForConditionalGeneration
 from sentence_transformers import SentenceTransformer
 from PIL import Image, UnidentifiedImageError
 from typing import Callable, List, Dict, Any, Generator
 import json, os, traceback, platform
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import argparse
 
 # ------------------------------
 # Environment Detection
@@ -29,18 +30,21 @@ def load_models(env: str):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     if env == "desktop":
-        blip_name = "Salesforce/blip-image-captioning-base"
+        blip_name = "Salesforce/blip-image-captioning-large"
         clip_name = "clip-ViT-B-32"
-        batch_size = 8
-        beam_size = 5
+        batch_size = 2
+        beam_size = 1
     else:
         blip_name = "Salesforce/blip-image-captioning-small"
         clip_name = "sentence-transformers/clip-ViT-B-32-multilingual-v1"
         batch_size = 2
         beam_size = 3
 
+
     blip_processor = BlipProcessor.from_pretrained(blip_name)
-    blip_model = BlipForConditionalGeneration.from_pretrained(blip_name).to(device)
+    blip_model = BlipForConditionalGeneration.from_pretrained(blip_name)
+
+
     clip_model = SentenceTransformer(clip_name)
     
     return blip_processor, blip_model, clip_model, batch_size, beam_size, device
@@ -50,16 +54,25 @@ def load_models(env: str):
 # ------------------------------
 def blip_caption_single(img_path: str, blip_processor, blip_model, beam_size: int, device) -> List[str]:
     """Generate multiple captions for a single image using BLIP."""
+    prompt = "a photograph of"
+
     try:
         raw_image = Image.open(img_path).convert("RGB")
     except (FileNotFoundError, UnidentifiedImageError) as e:
         print(f"[WARNING] Cannot open image {img_path}: {e}")
         return []
 
-    inputs = blip_processor(raw_image, return_tensors="pt").to(device)
+    print ("Starting blip_processor")
+
+    inputs = blip_processor(images=raw_image, text=prompt, return_tensors="pt").to(device)
+
+    #inputs = blip_processor(images=raw_image, return_tensors="pt").to(device)
+
     out = blip_model.generate(
-        **inputs, num_beams=beam_size, num_return_sequences=beam_size, max_new_tokens=30
+        **inputs, num_beams=beam_size, num_return_sequences=beam_size, max_new_tokens=100
     )
+    print (f"finished blip_processor: {out}")
+
     return [blip_processor.decode(o, skip_special_tokens=True) for o in out]
 
 # ------------------------------
@@ -103,6 +116,7 @@ def process_folder_parallel_blip(
                 except:
                     continue
 
+    print(f"folker_path={folder_path}")
     # Gather image paths
     image_paths = []
     for root, _, files in os.walk(folder_path):
@@ -134,8 +148,10 @@ def process_folder_parallel_blip(
         if not images:
             continue
 
+        print ("Starting batch_embeddings")
         # --- GPU batch CLIP embeddings ---
         batch_embeddings = clip_embeddings(images, clip_model, device)
+        print ("finished batch_embeddings")
 
         # --- Parallel BLIP captioning ---
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -202,10 +218,18 @@ def print_consumer(data: Dict[str, Any]):
 # Usage
 # ------------------------------
 if __name__ == "__main__":
-    folder = "/backup/Hard Drive Backups/SSD 1/Aai Baba US visit"
+    parser = argparse.ArgumentParser(description='Describe an image using Ollama or Hugging Face models.')
+    parser.add_argument('--ip', required=True, dest='image_path', help='Path to the image file')
+
+    args = parser.parse_args()
+
+    print("-START-")
+    output_lines = []
+    start_str = f"START: {args.image_path}"
+
     cache = "processed_cache.jsonl"
     for _ in process_folder_parallel_blip(
-        folder_path=folder,
+        folder_path=args.image_path,
         consumers=[print_consumer],
         cache_file=cache,
         max_workers=4

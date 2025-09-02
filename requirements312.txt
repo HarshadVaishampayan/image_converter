@@ -29,7 +29,6 @@ torch==2.8.0
 # CPU-only install: pip install torch==2.8.0 torchvision==0.17.2 torchaudio==2.1.2
 # (no +cu117, as CUDA is not supported for 3.12)
 torchvision==0.17.2
-torchaudio==2.1.2
 tqdm==4.67.1
 transformers==4.55.2
 typing_extensions==4.14.1
