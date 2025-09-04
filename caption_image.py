@@ -3,6 +3,7 @@ from transformers import BlipForConditionalGeneration, BlipProcessor, InstructBl
 from sentence_transformers import SentenceTransformer
 from PIL import Image, UnidentifiedImageError
 from typing import Callable, List, Dict, Any, Generator
+from persistence import PersistenceAPI;
 import json, os, traceback, platform
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse
@@ -33,135 +34,68 @@ def load_models(env: str):
         blip_name = "Salesforce/blip-image-captioning-large"
         clip_name = "clip-ViT-B-32"
         batch_size = 2
-        beam_size = 1
+        beam_size = 2
     else:
         blip_name = "Salesforce/blip-image-captioning-small"
         clip_name = "sentence-transformers/clip-ViT-B-32-multilingual-v1"
         batch_size = 2
-        beam_size = 3
+        beam_size = 2
 
-
-    blip_processor = BlipProcessor.from_pretrained(blip_name)
-    blip_model = BlipForConditionalGeneration.from_pretrained(blip_name)
-
-
-    clip_model = SentenceTransformer(clip_name)
-    
-    return blip_processor, blip_model, clip_model, batch_size, beam_size, device
+    return blip_name, clip_name, batch_size, beam_size
 
 # ------------------------------
-# BLIP Captioning
-# ------------------------------
-def blip_caption_single(img_path: str, blip_processor, blip_model, beam_size: int, device) -> List[str]:
-    """Generate multiple captions for a single image using BLIP."""
-    prompt = "a photograph of"
-
-    try:
-        raw_image = Image.open(img_path).convert("RGB")
-    except (FileNotFoundError, UnidentifiedImageError) as e:
-        print(f"[WARNING] Cannot open image {img_path}: {e}")
-        return []
-
-    print ("Starting blip_processor")
-
-    inputs = blip_processor(images=raw_image, text=prompt, return_tensors="pt").to(device)
-
-    #inputs = blip_processor(images=raw_image, return_tensors="pt").to(device)
-
-    out = blip_model.generate(
-        **inputs, num_beams=beam_size, num_return_sequences=beam_size, max_new_tokens=100
-    )
-    print (f"finished blip_processor: {out}")
-
-    return [blip_processor.decode(o, skip_special_tokens=True) for o in out]
-
-# ------------------------------
-# CLIP Embeddings (GPU batched)
-# ------------------------------
-def clip_embeddings(images: List[Image.Image], clip_model, device) -> torch.Tensor:
-    """Compute CLIP embeddings for a batch of images."""
-    return clip_model.encode(images, convert_to_tensor=True, device=device)
-
-# ------------------------------
-# Process folder with parallel BLIP
+# Process in batches
 # ------------------------------
 def process_folder_parallel_blip(
     folder_path: str,
     consumers: List[Callable[[Dict[str, Any]], None]] = None,
-    extensions: List[str] = None,
     cache_file: str = None,
-    max_workers: int = 4
-) -> Generator[dict, None, None]:
-    """
-    Process all images in folder → embeddings + captions.
-    Results are streamed to consumers + optional cache.
-    """
-    env = detect_environment()
-    print(f"[INFO] Detected environment: {env}")
-    blip_processor, blip_model, clip_model, batch_size, beam_size, device = load_models(env)
+    max_workers: int = 4,
+):
+    """Process images in a folder in parallel using BLIP for captioning."""
+    blip_name, clip_name, batch_size, beam_size = load_models(detect_environment())
+    blip_processor = BlipProcessor.from_pretrained(blip_name)
+    blip_model = BlipForConditionalGeneration.from_pretrained(blip_name)
+    clip_model = SentenceTransformer(clip_name)
+    device = get_device()
+    blip_model.to(device)
+    clip_model.to(device)
 
-    if extensions is None:
-        extensions = [".jpg", ".jpeg", ".png", ".bmp", ".tiff"]
+    images = []
+    valid_paths = []
 
-    print(f"[INFO] Using batch_size={batch_size}, beam_size={beam_size}, device={device}")
-
-    # Load cache
-    processed_cache = set()
-    if cache_file and os.path.exists(cache_file):
-        with open(cache_file, "r") as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                    processed_cache.add(entry["image_path"])
-                except:
-                    continue
-
-    print(f"folker_path={folder_path}")
-    # Gather image paths
-    image_paths = []
-    for root, _, files in os.walk(folder_path):
-        for f in files:
-            if any(f.lower().endswith(ext) for ext in extensions):
-                img_path = os.path.join(root, f)
-                if img_path not in processed_cache:
-                    image_paths.append(img_path)
-                else:
-                    print(f"[INFO] Skipping cached image: {img_path}")
-
-    # Process in batches
-    for i in range(0, len(image_paths), batch_size):
-        batch_paths = image_paths[i:i+batch_size]
-        images = []
-        valid_paths = []
-
-        # Load images
-        for p in batch_paths:
+    # Load images
+    for p in os.listdir(folder_path):
+        full_path = os.path.join(folder_path, p)
+        if os.path.isfile(full_path):
             try:
-                print(f"[INFO] Loading image: {p}")
-                img = Image.open(p).convert("RGB")
+                img = Image.open(full_path).convert("RGB")
                 images.append(img)
-                valid_paths.append(p)
+                valid_paths.append(full_path)
             except (FileNotFoundError, UnidentifiedImageError) as e:
-                print(f"[WARNING] Cannot open image {p}: {e}")
+                print(f"[WARNING] Cannot open image {full_path}: {e}")
                 continue
 
-        if not images:
-            continue
+    if not images:
+        return
 
-        print ("Starting batch_embeddings")
+    # Process in batches
+    for i in range(0, len(images), batch_size):
+        batch_images = images[i:i+batch_size]
+        batch_paths = valid_paths[i:i+batch_size]
+
         # --- GPU batch CLIP embeddings ---
-        batch_embeddings = clip_embeddings(images, clip_model, device)
-        print ("finished batch_embeddings")
+        batch_embeddings = create_embeddings(clip_model, device, images)
 
         # --- Parallel BLIP captioning ---
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_path = {
-                executor.submit(blip_caption_single, p, blip_processor, blip_model, beam_size, device): idx
-                for idx, p in enumerate(valid_paths)
+                executor.submit(blip_caption_single, img, blip_processor, blip_model, beam_size, device): idx
+                for idx, img in enumerate(batch_images)
             }
             for future in as_completed(future_to_path):
                 idx = future_to_path[future]
-                img_path = valid_paths[idx]
+                img_path = batch_paths[idx]
                 try:
                     captions = future.result()
                     if not captions:
@@ -179,7 +113,15 @@ def process_folder_parallel_blip(
                     result = {
                         "image_path": img_path,
                         "embedding": batch_embeddings[idx].cpu().numpy(),
-                        "captions": [{"text": cap, "similarity": sim} for cap, sim in top_captions]
+                        "captions": [{"text": cap, "similarity": sim} for cap, sim in top_captions],
+                        "width": batch_images[idx].width,
+                        "height": batch_images[idx].height,
+                        "metadata": {
+                            "env": detect_environment(),
+                            "device": str(device),
+                            "batch_size": batch_size,
+                            "beam_size": beam_size,
+                        },
                     }
 
                     # Notify consumers safely
@@ -207,12 +149,59 @@ def process_folder_parallel_blip(
                     print(f"[ERROR] BLIP captioning failed for {img_path}: {e}")
                     traceback.print_exc()
 
+def get_device():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return device
+
+def create_embeddings(clip_model, device, images):
+    batch_embeddings = clip_model.encode(images, convert_to_tensor=True, device=device)
+    return batch_embeddings
+
+def blip_caption_single(img: Image.Image, blip_processor: BlipProcessor, blip_model: BlipForConditionalGeneration, beam_size: int, device: torch.device):
+    """Generate captions for a single image using BLIP."""
+    inputs = blip_processor(img, return_tensors="pt").to(device)
+    outputs = blip_model.generate(**inputs, num_beams=beam_size, num_return_sequences=beam_size, max_new_tokens=100)
+    captions = [blip_processor.decode(output, skip_special_tokens=True) for output in outputs]
+    return captions
+
 # ------------------------------
 # Example consumer
 # ------------------------------
 def print_consumer(data: Dict[str, Any]):
     """Simple consumer that prints output."""
     print("PRINT:", data["image_path"], "→", [c["text"] for c in data["captions"]])
+
+# ------------------------------
+# Persistence consumer
+# ------------------------------
+def make_persistence_consumer(db_path: str = "images.db", dim: int = 512):
+    """
+    Returns a consumer that writes image, captions, metadata, and embedding
+    into SQLite (metadata) and FAISS (vector search) via PersistenceAPI.
+    """
+    api = PersistenceAPI(db_path=db_path, dim=dim)
+
+    def _consumer(data: Dict[str, Any]):
+        file_path = data["image_path"]
+        emb = data["embedding"]
+        captions = [c["text"] for c in data.get("captions", [])]
+        width = data.get("width")
+        height = data.get("height")
+        metadata = data.get("metadata", {})
+
+        # Convert numpy embedding → Python list[float] for PersistenceAPI
+        emb_list = emb.tolist() if hasattr(emb, "tolist") else emb
+
+        api.insert_or_update(
+            file_path=file_path,
+            embedding=emb_list,
+            captions=captions,
+            metadata=metadata,
+            width=width,
+            height=height,
+        )
+
+    return _consumer
 
 # ------------------------------
 # Usage
@@ -228,9 +217,11 @@ if __name__ == "__main__":
     start_str = f"START: {args.image_path}"
 
     cache = "processed_cache.jsonl"
+    # Add the persistence consumer alongside the print consumer
+    persist_consumer = make_persistence_consumer(db_path="images.db", dim=512)
     for _ in process_folder_parallel_blip(
         folder_path=args.image_path,
-        consumers=[print_consumer],
+        consumers=[print_consumer, persist_consumer],
         cache_file=cache,
         max_workers=4
     ):
