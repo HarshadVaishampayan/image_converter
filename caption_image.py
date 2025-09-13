@@ -1,5 +1,5 @@
 import torch
-from transformers import BlipForConditionalGeneration, BlipProcessor, InstructBlipProcessor, InstructBlipForConditionalGeneration
+from transformers import BlipForConditionalGeneration, BlipProcessor, InstructBlipProcessor, InstructBlipForConditionalGeneration, AutoProcessor, Blip2ForConditionalGeneration
 from sentence_transformers import SentenceTransformer
 from PIL import Image, UnidentifiedImageError
 from typing import Callable, List, Dict, Any, Generator
@@ -28,7 +28,7 @@ def detect_environment() -> str:
 # ------------------------------
 def load_models(env: str):
     """Load BLIP + CLIP models and config depending on environment type."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     if env == "desktop":
         blip_name = "Salesforce/blip-image-captioning-large"
@@ -41,113 +41,113 @@ def load_models(env: str):
         batch_size = 2
         beam_size = 2
 
-    return blip_name, clip_name, batch_size, beam_size
+    return blip_name, clip_name, batch_size, beam_size, device
 
 # ------------------------------
 # Process in batches
 # ------------------------------
 def process_folder_parallel_blip(
-    folder_path: str,
+    path: str,
     consumers: List[Callable[[Dict[str, Any]], None]] = None,
     cache_file: str = None,
-    max_workers: int = 4,
-):
-    """Process images in a folder in parallel using BLIP for captioning."""
-    blip_name, clip_name, batch_size, beam_size = load_models(detect_environment())
-    blip_processor = BlipProcessor.from_pretrained(blip_name)
-    blip_model = BlipForConditionalGeneration.from_pretrained(blip_name)
-    clip_model = SentenceTransformer(clip_name)
-    device = get_device()
-    blip_model.to(device)
-    clip_model.to(device)
+    max_workers: int = 4
+) -> Generator:
+    """Process a single image or all images in a folder using BLIP for captioning."""
+    print(f"\nProcessing path: {path}")
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Load both BLIP and CLIP models
+    blip_name, clip_name, batch_size, beam_size, _ = load_models(detect_environment())
+    processor = BlipProcessor.from_pretrained(blip_name)
+    model = BlipForConditionalGeneration.from_pretrained(blip_name).to(device)
+    clip_model = SentenceTransformer(clip_name).to(device)  # Add CLIP model
 
-    images = []
-    valid_paths = []
-
-    # Load images
-    for p in os.listdir(folder_path):
-        full_path = os.path.join(folder_path, p)
-        if os.path.isfile(full_path):
-            try:
-                img = Image.open(full_path).convert("RGB")
-                images.append(img)
-                valid_paths.append(full_path)
-            except (FileNotFoundError, UnidentifiedImageError) as e:
-                print(f"[WARNING] Cannot open image {full_path}: {e}")
-                continue
-
-    if not images:
+    # Check if path is a file or directory
+    if os.path.isfile(path):
+        paths_to_process = [path]
+    elif os.path.isdir(path):
+        paths_to_process = [
+            os.path.join(path, p) for p in os.listdir(path)
+            if p.lower().endswith((".jpg", ".jpeg", ".png"))
+        ]
+    else:
+        print(f"Error: {path} is not a valid file or directory")
         return
 
-    # Process in batches
-    for i in range(0, len(images), batch_size):
-        batch_images = images[i:i+batch_size]
-        batch_paths = valid_paths[i:i+batch_size]
+    for image_path in paths_to_process:
+        try:
+            # Load and process image
+            image = Image.open(image_path).convert("RGB")
+            
+            # Generate captions using BLIP
+            inputs = processor(images=image, return_tensors="pt").to(device)
+            outputs = model.generate(**inputs, num_beams=beam_size, 
+                                  num_return_sequences=beam_size, max_new_tokens=100)
+            captions = [processor.decode(output, skip_special_tokens=True) 
+                       for output in outputs]
 
-        # --- GPU batch CLIP embeddings ---
-        batch_embeddings = create_embeddings(clip_model, device, images)
-
-        # --- Parallel BLIP captioning ---
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_path = {
-                executor.submit(blip_caption_single, img, blip_processor, blip_model, beam_size, device): idx
-                for idx, img in enumerate(batch_images)
+            # Generate embedding using CLIP
+            embedding = clip_model.encode([image], convert_to_tensor=True, device=device)
+            embedding = embedding[0].cpu().numpy()  # Convert to numpy array
+            
+            # Create result dictionary with embedding
+            result = {
+                "image_path": image_path,
+                "captions": [{"text": cap} for cap in captions],
+                "embedding": embedding,  # Add embedding to result
+                "width": image.width,
+                "height": image.height,
+                "metadata": {
+                    "env": detect_environment(),
+                    "device": str(device),
+                    "batch_size": batch_size,
+                    "beam_size": beam_size,
+                },
             }
-            for future in as_completed(future_to_path):
-                idx = future_to_path[future]
-                img_path = batch_paths[idx]
-                try:
-                    captions = future.result()
-                    if not captions:
-                        continue
 
-                    # Cosine similarity & top-N
-                    image_emb = batch_embeddings[idx].unsqueeze(0)
-                    caption_embs = clip_model.encode(captions, convert_to_tensor=True, device=device)
-                    cosine_sim = torch.nn.functional.cosine_similarity(image_emb, caption_embs)
-                    ranked = sorted(zip(captions, cosine_sim.tolist()), key=lambda x: x[1], reverse=True)
-                    top_captions = ranked[:beam_size]
-                    for cap, sim in top_captions:
-                        print(f"[INFO] {img_path} → {cap} (sim={sim:.4f})")
+            # Notify consumers safely
+            if consumers:
+                for consumer in consumers:
+                    try:
+                        consumer(result)
+                    except Exception as e:
+                        print(f"[WARNING] Consumer {consumer.__name__} failed for {image_path}: {e}")
+                        traceback.print_exc()
 
-                    result = {
-                        "image_path": img_path,
-                        "embedding": batch_embeddings[idx].cpu().numpy(),
-                        "captions": [{"text": cap, "similarity": sim} for cap, sim in top_captions],
-                        "width": batch_images[idx].width,
-                        "height": batch_images[idx].height,
-                        "metadata": {
-                            "env": detect_environment(),
-                            "device": str(device),
-                            "batch_size": batch_size,
-                            "beam_size": beam_size,
-                        },
-                    }
+            # Update cache
+            if cache_file:
+                with open(cache_file, "a") as f:
+                    json.dump({
+                        "image_path": result["image_path"],
+                        "captions": result["captions"]
+                    }, f)
+                    f.write("\n")
 
-                    # Notify consumers safely
-                    if consumers:
-                        for consumer in consumers:
-                            try:
-                                consumer(result)
-                            except Exception as e:
-                                print(f"[WARNING] Consumer {consumer.__name__} failed for {img_path}: {e}")
-                                traceback.print_exc()
+            yield result
 
-                    # Update cache
-                    if cache_file:
-                        with open(cache_file, "a") as f:
-                            json.dump({
-                                "image_path": result["image_path"],
-                                "embedding": result["embedding"].tolist(),
-                                "captions": result["captions"]
-                            }, f)
-                            f.write("\n")
+        except Exception as e:
+            print(f"[ERROR] Processing {image_path} failed: {e}")
+            traceback.print_exc()
 
-                    yield result
-
-                except Exception as e:
-                    print(f"[ERROR] BLIP captioning failed for {img_path}: {e}")
-                    traceback.print_exc()
+def normalize(embedding):
+    """
+    Normalize embedding vector to unit length.
+    Handles both numpy arrays and pytorch tensors.
+    """
+    import torch
+    import numpy as np
+    
+    if isinstance(embedding, np.ndarray):
+        # Numpy array normalization
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            return embedding / norm
+        return embedding
+    elif isinstance(embedding, torch.Tensor):
+        # PyTorch tensor normalization
+        return torch.nn.functional.normalize(embedding, p=2, dim=-1)
+    else:
+        raise TypeError(f"Unsupported embedding type: {type(embedding)}")
 
 def get_device():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -159,7 +159,7 @@ def create_embeddings(clip_model, device, images):
 
 def blip_caption_single(img: Image.Image, blip_processor: BlipProcessor, blip_model: BlipForConditionalGeneration, beam_size: int, device: torch.device):
     """Generate captions for a single image using BLIP."""
-    inputs = blip_processor(img, return_tensors="pt").to(device)
+    inputs = blip_processor(images=img, return_tensors="pt").to(device)
     outputs = blip_model.generate(**inputs, num_beams=beam_size, num_return_sequences=beam_size, max_new_tokens=100)
     captions = [blip_processor.decode(output, skip_special_tokens=True) for output in outputs]
     return captions
@@ -169,7 +169,7 @@ def blip_caption_single(img: Image.Image, blip_processor: BlipProcessor, blip_mo
 # ------------------------------
 def print_consumer(data: Dict[str, Any]):
     """Simple consumer that prints output."""
-    print("PRINT:", data["image_path"], "→", [c["text"] for c in data["captions"]])
+    print("PRINT:", data["image_path"], "→", [c["text"] for c in data.get("captions", [])])
 
 # ------------------------------
 # Persistence consumer
@@ -220,7 +220,7 @@ if __name__ == "__main__":
     # Add the persistence consumer alongside the print consumer
     persist_consumer = make_persistence_consumer(db_path="images.db", dim=512)
     for _ in process_folder_parallel_blip(
-        folder_path=args.image_path,
+        path=args.image_path,
         consumers=[print_consumer, persist_consumer],
         cache_file=cache,
         max_workers=4
@@ -228,14 +228,22 @@ if __name__ == "__main__":
         pass
 
 
-# ------------------------------
-# ⚡ Potential Improvements (Future Work)
-# ------------------------------
-# 1. Use asyncio + aiofiles for async image loading (avoid blocking on I/O).
-# 2. Add dynamic GPU memory monitoring to auto-tune batch size.
-# 3. Extend to support video frames (extract frames → run same embedding+caption pipeline).
-# 4. Add better cache indexing (SQLite or DuckDB) for faster lookups instead of JSONL.
-# 5. Add retry logic for flaky consumers (e.g. DB/network writers).
-# 6. Add streaming/real-time processing support (watch a folder for new images).
-# 7. Add support for ONNX/TensorRT model export for lighter mobile inference.
+def generate_caption_blip2_coco(image_path: str, max_new_tokens: int = 20) -> str:
+    """
+    Generate a caption using the BLIP-2 model fine-tuned on COCO.
+    Localized function so it doesn't interfere with the existing BLIP pipeline.
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    processor = AutoProcessor.from_pretrained("Salesforce/blip2-opt-6.7b-coco")
+    model = Blip2ForConditionalGeneration.from_pretrained(
+        "Salesforce/blip2-opt-6.7b-coco", 
+        device_map="auto"
+    ).to(device)
+
+    image = Image.open(image_path).convert("RGB")
+    inputs = processor(images=image, return_tensors="pt").to(device)
+    generated = model.generate(**inputs, max_new_tokens=max_new_tokens)
+    caption = processor.batch_decode(generated, skip_special_tokens=True)[0]
+
+    return caption
 

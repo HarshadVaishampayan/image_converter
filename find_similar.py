@@ -1,9 +1,11 @@
 import argparse
+import numpy as np
 
 from sentence_transformers import SentenceTransformer
 import caption_image
 import persistence
 from PIL import Image
+from persistence import normalize_embedding  # Add this import
 
 def main():
     parser = argparse.ArgumentParser(description="Find similar images based on image or query string.")
@@ -20,39 +22,36 @@ def main():
     print(f"Running in environment: {env}")
     
     # Load models
-    blip_name, clip_name, batch_size, beam_size = caption_image.load_models(env)
-
+    blip_name, clip_name, batch_size, beam_size, device = caption_image.load_models(env)
     clip_model = SentenceTransformer(clip_name)
-    device = caption_image.get_device()
-
-    if args.image:
-        try:
-            img = Image.open(args.image).convert("RGB")
-        except FileNotFoundError:
-            print(f"Error: Image file not found at {args.image}")
-            return
-        except Exception as e:
-            print(f"Error: Could not open image file: {e}")
-            return
-
-        # Create embeddings
-        batch_embeddings = caption_image.create_embeddings(clip_model, device, [img])
-        embedding = batch_embeddings[0].cpu().numpy()
-
-        # Placeholder for persistence logic (replace with your actual code)
-        print(f"Embedding shape: {embedding.shape}")
-        # Example: Save embedding to a file
-        # np.save("image_embedding.npy", embedding)
-
-    elif args.query:
-        # Placeholder for query processing logic (replace with your actual code)
-        print(f"Processing query: {args.query}")
-        # Example: Encode query string using CLIP
-        query_embedding = clip_model.encode(args.query, convert_to_tensor=True, device=device)
-        print(f"Query embedding shape: {query_embedding.shape}")
-
     db = persistence.PersistenceAPI()
+
+    # Generate embedding based on input type
+    if args.image:
+        # Use same image encoding as during insertion
+        img = Image.open(args.image).convert('RGB')
+        embedding = clip_model.encode(img, convert_to_tensor=True, device=device)
+        embedding = embedding.cpu().numpy()
+    
+    elif args.query:
+        # For text queries, we need to use CLIP's text encoder
+        # but ensure the embedding is normalized the same way
+        text_embedding = clip_model.encode(args.query, convert_to_tensor=True, device=device)
+        text_embedding = text_embedding.cpu().numpy()
+        # Optional: Add additional normalization to better align with image embeddings
+        embedding = text_embedding
+
+    # Normalize embedding using the same function as in persistence.py
+    embedding = normalize_embedding(embedding)
+    print(f"Normalized embedding shape: {embedding.shape}")
+
+    # Search for similar images
     results = db.find_similar_images(embedding)
+    
+    # Print results
+    if not results:
+        print("No similar images found.")
+        return
 
     for result in results:
         print(f"Path: {result['file_path']}")
