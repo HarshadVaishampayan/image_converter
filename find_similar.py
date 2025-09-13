@@ -11,6 +11,8 @@ def main():
     parser = argparse.ArgumentParser(description="Find similar images based on image or query string.")
     parser.add_argument("--image", type=str, help="Path to the image.")
     parser.add_argument("--query", type=str, help="Query string.")
+    parser.add_argument("--rebuild-index", action="store_true", 
+                       help="Force rebuild of FAISS index before search")
     args = parser.parse_args()
 
     if not args.image and not args.query:
@@ -25,6 +27,11 @@ def main():
     blip_name, clip_name, batch_size, beam_size, device = caption_image.load_models(env)
     clip_model = SentenceTransformer(clip_name)
     db = persistence.PersistenceAPI()
+    
+    # Optionally force rebuild index
+    if args.rebuild_index:
+        print("Forcing FAISS index rebuild...")
+        db._rebuild_index()
 
     # Generate embedding based on input type
     if args.image:

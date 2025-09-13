@@ -22,7 +22,7 @@ class PersistenceAPI:
         self.db_path = db_path
         self.dim = dim  # embedding dimensionality
         self._init_db()
-        self.index = faiss.IndexFlatL2(self.dim)
+        self.index = None  # Initialize as None, will be built on-demand
         self.id_map = {}
         print(f"PersistenceAPI initialized successfully")
 
@@ -60,16 +60,18 @@ class PersistenceAPI:
         self._rebuild_index()
 
     def _rebuild_index(self):
-        """Load embeddings from SQLite into FAISS index."""
-        print(f"Rebuilding FAISS index...")
+        """Rebuild FAISS index from SQLite database."""
+        print("Rebuilding FAISS index...")
+        
+        # Initialize new FAISS index
+        self.index = faiss.IndexFlatL2(self.dim)
+        self.id_map.clear()
+        
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         cur.execute("SELECT image_id, embedding FROM images")
         rows = cur.fetchall()
         conn.close()
-
-        self.index.reset()
-        self.id_map = {}
 
         vectors = []
         for idx, (image_id, emb_blob) in enumerate(rows):
@@ -139,11 +141,7 @@ class PersistenceAPI:
                 values.append(image_id)
                 cur.execute(query, tuple(values))
                 conn.commit()
-
-                # Update FAISS index
-                if embedding is not None:
-                    print("Updating embedding in FAISS index")
-                    self._rebuild_index()
+                # Remove rebuild call here
         else:
             # Insert new image
             image_id = str(uuid.uuid4())
@@ -159,10 +157,7 @@ class PersistenceAPI:
                   embedding_bytes,
                   captions_str, metadata_str))
             conn.commit()
-
-            # Update FAISS index
-            print("Adding embedding to FAISS index")
-            self._rebuild_index()
+            # Remove rebuild call here
 
         conn.close()
         print(f"Operation completed for image: {file_path}")
@@ -175,11 +170,15 @@ class PersistenceAPI:
         """Return top-k most similar images to a query embedding."""
         print(f"\nSearching for {top_k} similar images...")
         
-        if self.index.ntotal == 0:
-            print("FAISS index is empty, attempting to rebuild...")
+        # Build/rebuild index if needed
+        if self.index is None:
+            print("FAISS index not initialized, building now...")
             self._rebuild_index()
             
-            # Check again after rebuild
+        if self.index.ntotal == 0:
+            print("FAISS index is empty, rebuilding...")
+            self._rebuild_index()
+            
             if self.index.ntotal == 0:
                 print("No vectors available in database to rebuild index")
                 return []
