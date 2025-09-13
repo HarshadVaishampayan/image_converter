@@ -3,6 +3,7 @@ import faiss
 import numpy as np
 import uuid
 from typing import List, Dict, Optional
+from model_manager import ModelManager  # Add this import
 
 def normalize_embedding(embedding: np.ndarray) -> np.ndarray:
     """Normalize embedding vector to unit length."""
@@ -24,6 +25,7 @@ class PersistenceAPI:
         self._init_db()
         self.index = None  # Initialize as None, will be built on-demand
         self.id_map = {}
+        self.model_manager = ModelManager()  # Use ModelManager instead of direct CLIP model
         print(f"PersistenceAPI initialized successfully")
 
     # ------------------------------
@@ -60,34 +62,78 @@ class PersistenceAPI:
         self._rebuild_index()
 
     def _rebuild_index(self):
-        """Rebuild FAISS index from SQLite database."""
-        print("Rebuilding FAISS index...")
+        """Rebuild FAISS index from SQLite database including both image and caption embeddings."""
+        print("\n=== Starting FAISS Index Rebuild ===")
         
         # Initialize new FAISS index
+        print(f"Initializing new FAISS index with dimension {self.dim}")
         self.index = faiss.IndexFlatL2(self.dim)
-        self.id_map.clear()
+        self.id_map = {}
         
+        print("Fetching data from SQLite database...")
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
-        cur.execute("SELECT image_id, embedding FROM images")
+        cur.execute("SELECT image_id, embedding, captions FROM images")
         rows = cur.fetchall()
         conn.close()
+        print(f"Found {len(rows)} images in database")
 
         vectors = []
-        for idx, (image_id, emb_blob) in enumerate(rows):
-            emb = np.frombuffer(emb_blob, dtype=np.float32)
-            if emb.shape[0] != self.dim:
-                print(f"Warning: Skipping malformed embedding for image_id={image_id}")
+        image_count = 0
+        caption_count = 0
+        skipped_count = 0
+
+        for idx, (image_id, emb_blob, captions) in enumerate(rows):
+            # Add image embedding
+            print(f"\nProcessing image {idx + 1}/{len(rows)}: {image_id}")
+            img_emb = np.frombuffer(emb_blob, dtype=np.float32)
+            if img_emb.shape[0] != self.dim:
+                print(f"  ⚠️ Warning: Skipping malformed image embedding (dim={img_emb.shape[0]})")
+                skipped_count += 1
                 continue
-            vectors.append(emb)
-            self.id_map[idx] = image_id
+            vectors.append(img_emb)
+            self.id_map[len(vectors)-1] = (image_id, 'image')
+            image_count += 1
+            print(f"  ✓ Added image embedding")
+            
+            # Add caption embeddings if available
+            if captions:
+                caption_list = captions.split(',')
+                print(f"  Processing {len(caption_list)} captions")
+                for caption in caption_list:
+                    if not caption.strip():
+                        continue
+                    print(f"    Processing caption: {caption[:50]}...")
+                    caption_emb = self._get_text_embedding(caption)
+                    if caption_emb is not None:
+                        vectors.append(caption_emb)
+                        self.id_map[len(vectors)-1] = (image_id, 'caption')
+                        caption_count += 1
+                        print(f"    ✓ Added caption embedding")
+                    else:
+                        print(f"    ⚠️ Failed to generate caption embedding")
 
         if vectors:
+            print("\nAdding vectors to FAISS index...")
             mat = np.vstack(vectors).astype("float32")
             self.index.add(mat)
-            print(f"FAISS index rebuilt with {len(vectors)} vectors")
+            print(f"\n=== Index Rebuild Complete ===")
+            print(f"Total vectors added: {len(vectors)}")
+            print(f"  - Image embeddings: {image_count}")
+            print(f"  - Caption embeddings: {caption_count}")
+            print(f"  - Skipped embeddings: {skipped_count}")
         else:
-            print("No vectors available to rebuild index")
+            print("\n⚠️ No vectors available to rebuild index")
+
+    def _get_text_embedding(self, text: str) -> Optional[np.ndarray]:
+        """Generate embedding for text using CLIP text encoder."""
+        try:
+            clip_model = self.model_manager.get_clip_model()  # Get model from ModelManager
+            text_emb = clip_model.encode([text], convert_to_tensor=True)
+            return text_emb[0].cpu().numpy()
+        except Exception as e:
+            print(f"  ⚠️ Warning: Failed to generate text embedding: {e}")
+            return None
 
     # ------------------------------
     # Core CRUD
@@ -166,11 +212,10 @@ class PersistenceAPI:
     # ------------------------------
     # Querying
     # ------------------------------
-    def find_similar_images(self, query_embedding: List[float], top_k: int = 5) -> List[Dict]:
+    def find_similar_images(self, query_embedding: List[float], top_k: int = 5, is_text_query: bool = False) -> List[Dict]:
         """Return top-k most similar images to a query embedding."""
         print(f"\nSearching for {top_k} similar images...")
         
-        # Build/rebuild index if needed
         if self.index is None:
             print("FAISS index not initialized, building now...")
             self._rebuild_index()
@@ -183,34 +228,26 @@ class PersistenceAPI:
                 print("No vectors available in database to rebuild index")
                 return []
 
-        # Validate query embedding dimension
-        query_vec = np.array(query_embedding, dtype=np.float32)
-        print(f"Input query vector shape: {query_vec.shape}")
+        query_vec = np.array(query_embedding, dtype=np.float32).reshape(1, -1)
+        print(f"Query vector shape: {query_vec.shape}")
         
-        if len(query_vec) != self.dim:
-            raise ValueError(f"Query embedding dimension ({len(query_vec)}) does not match index dimension ({self.dim})")
-        
-        # Reshape to 2D array for FAISS
-        query_vec = query_vec.reshape(1, -1)
-        print(f"Reshaped query vector: {query_vec.shape}")
-        
-        try:
-            dists, idxs = self.index.search(query_vec, top_k)
-            print(f"Found {len(idxs[0])} matches")
-            print(f"Distances: {dists[0]}")
-        except AssertionError as e:
-            print(f"FAISS dimension mismatch: Expected {self.dim}, got {len(query_embedding)}")
-            raise ValueError(f"Embedding dimension mismatch: Expected {self.dim}, got {len(query_embedding)}")
+        dists, idxs = self.index.search(query_vec, top_k * 2)  # Get more results as some might be captions
         
         results = []
+        seen_images = set()  # Track unique images
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
         for rank, idx in enumerate(idxs[0]):
             if idx == -1 or idx not in self.id_map:
-                print(f"Skipping invalid index: {idx}")
                 continue
-            image_id = self.id_map[idx]
+                
+            image_id, entry_type = self.id_map[idx]
+            
+            # Skip if we've already included this image
+            if image_id in seen_images:
+                continue
+                
             cursor.execute("SELECT file_path, captions, metadata FROM images WHERE image_id = ?", (image_id,))
             row = cursor.fetchone()
             if row:
@@ -219,12 +256,17 @@ class PersistenceAPI:
                     "file_path": row[0],
                     "captions": row[1].split(",") if row[1] else [],
                     "metadata": row[2],
-                    "score": float(dists[0][rank])
+                    "score": float(dists[0][rank]),
+                    "matched_by": entry_type
                 })
-                print(f"Match {rank+1}: {row[0]} (score: {float(dists[0][rank])})")
+                seen_images.add(image_id)
+                print(f"Match {len(results)}: {row[0]} (score: {float(dists[0][rank])}, type: {entry_type})")
+                
+                if len(results) >= top_k:
+                    break
         
         conn.close()
-        print(f"Returning {len(results)} results")
+        print(f"Returning {len(results)} unique image results")
         return results
 
     def get_image(self, image_id: str) -> Optional[Dict]:

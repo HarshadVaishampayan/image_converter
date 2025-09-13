@@ -1,47 +1,19 @@
-import torch
-from transformers import BlipForConditionalGeneration, BlipProcessor, InstructBlipProcessor, InstructBlipForConditionalGeneration, AutoProcessor, Blip2ForConditionalGeneration
+from transformers import (
+    BlipProcessor,
+    BlipForConditionalGeneration,
+    AutoProcessor,
+    Blip2ForConditionalGeneration
+)
 from sentence_transformers import SentenceTransformer
 from PIL import Image, UnidentifiedImageError
 from typing import Callable, List, Dict, Any, Generator
-from persistence import PersistenceAPI;
-import json, os, traceback, platform
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from persistence import PersistenceAPI
+from model_manager import ModelManager, detect_environment, load_models
+import torch
+import json
+import os
+import traceback
 import argparse
-
-# ------------------------------
-# Environment Detection
-# ------------------------------
-def detect_environment() -> str:
-    """Detect if running on desktop or mobile (very basic heuristic)."""
-    system = platform.system().lower()
-    if system in ["linux", "windows", "darwin"]:
-        if "ANDROID_ROOT" in os.environ:  # Android on Linux
-            return "mobile"
-        return "desktop"
-    elif system in ["ios"]:
-        return "mobile"
-    else:
-        return "desktop"
-
-# ------------------------------
-# Load Models Based on Environment
-# ------------------------------
-def load_models(env: str):
-    """Load BLIP + CLIP models and config depending on environment type."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    if env == "desktop":
-        blip_name = "Salesforce/blip-image-captioning-large"
-        clip_name = "clip-ViT-B-32"
-        batch_size = 2
-        beam_size = 2
-    else:
-        blip_name = "Salesforce/blip-image-captioning-small"
-        clip_name = "sentence-transformers/clip-ViT-B-32-multilingual-v1"
-        batch_size = 2
-        beam_size = 2
-
-    return blip_name, clip_name, batch_size, beam_size, device
 
 # ------------------------------
 # Process in batches
@@ -52,16 +24,14 @@ def process_folder_parallel_blip(
     cache_file: str = None,
     max_workers: int = 4
 ) -> Generator:
-    """Process a single image or all images in a folder using BLIP for captioning."""
     print(f"\nProcessing path: {path}")
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # Load both BLIP and CLIP models
-    blip_name, clip_name, batch_size, beam_size, _ = load_models(detect_environment())
-    processor = BlipProcessor.from_pretrained(blip_name)
-    model = BlipForConditionalGeneration.from_pretrained(blip_name).to(device)
-    clip_model = SentenceTransformer(clip_name).to(device)  # Add CLIP model
+    # Get cached models and parameters
+    model_manager = ModelManager()
+    processor, model, beam_size, batch_size = model_manager.get_blip_models()
+    clip_model = model_manager.get_clip_model()
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Check if path is a file or directory
     if os.path.isfile(path):
         paths_to_process = [path]
@@ -229,21 +199,13 @@ if __name__ == "__main__":
 
 
 def generate_caption_blip2_coco(image_path: str, max_new_tokens: int = 20) -> str:
-    """
-    Generate a caption using the BLIP-2 model fine-tuned on COCO.
-    Localized function so it doesn't interfere with the existing BLIP pipeline.
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    processor = AutoProcessor.from_pretrained("Salesforce/blip2-opt-6.7b-coco")
-    model = Blip2ForConditionalGeneration.from_pretrained(
-        "Salesforce/blip2-opt-6.7b-coco", 
-        device_map="auto"
-    ).to(device)
-
+    model_manager = ModelManager()
+    processor, model = model_manager.get_blip2_models()
+    
     image = Image.open(image_path).convert("RGB")
-    inputs = processor(images=image, return_tensors="pt").to(device)
+    inputs = processor(images=image, return_tensors="pt").to(model_manager.device)
     generated = model.generate(**inputs, max_new_tokens=max_new_tokens)
     caption = processor.batch_decode(generated, skip_special_tokens=True)[0]
-
+    
     return caption
 
