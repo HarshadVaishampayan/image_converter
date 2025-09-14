@@ -18,34 +18,45 @@ import argparse
 # ------------------------------
 # Process in batches
 # ------------------------------
+def _get_image_paths(path: str) -> List[str]:
+    """Helper function to recursively get all image paths."""
+    image_paths = []
+    if os.path.isfile(path):
+        if path.lower().endswith((".jpg", ".jpeg", ".png")):
+            image_paths.append(path)
+    elif os.path.isdir(path):
+        for root, _, files in os.walk(path):
+            for file in files:
+                if file.lower().endswith((".jpg", ".jpeg", ".png")):
+                    image_paths.append(os.path.join(root, file))
+    return image_paths
+
 def process_folder_parallel_blip(
     path: str,
     consumers: List[Callable[[Dict[str, Any]], None]] = None,
     cache_file: str = None,
     max_workers: int = 4
 ) -> Generator:
+    """Process images in a directory recursively using BLIP for captioning."""
     print(f"\nProcessing path: {path}")
     
     # Get cached models and parameters
     model_manager = ModelManager()
     processor, model, beam_size, batch_size = model_manager.get_blip_models()
     clip_model = model_manager.get_clip_model()
+    device = model_manager.device
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # Check if path is a file or directory
-    if os.path.isfile(path):
-        paths_to_process = [path]
-    elif os.path.isdir(path):
-        paths_to_process = [
-            os.path.join(path, p) for p in os.listdir(path)
-            if p.lower().endswith((".jpg", ".jpeg", ".png"))
-        ]
-    else:
-        print(f"Error: {path} is not a valid file or directory")
+    # Get all image paths recursively
+    paths_to_process = _get_image_paths(path)
+    if not paths_to_process:
+        print(f"Error: No valid images found in {path}")
         return
+
+    print(f"Found {len(paths_to_process)} images to process")
 
     for image_path in paths_to_process:
         try:
+            print(f"Processing: {image_path}")
             # Load and process image
             image = Image.open(image_path).convert("RGB")
             

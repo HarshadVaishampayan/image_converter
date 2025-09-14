@@ -2,8 +2,10 @@ import sqlite3
 import faiss
 import numpy as np
 import uuid
+import os
+import pickle
 from typing import List, Dict, Optional
-from model_manager import ModelManager  # Add this import
+from model_manager import ModelManager 
 
 def normalize_embedding(embedding: np.ndarray) -> np.ndarray:
     """Normalize embedding vector to unit length."""
@@ -18,10 +20,11 @@ class PersistenceAPI:
     Embeddings are persisted in SQLite. FAISS index is rebuilt at startup.
     """
 
-    def __init__(self, db_path: str = "images.db", dim: int = 512):
+    def __init__(self, db_path: str = "images.db", dim: int = 512, index_path: str = "faiss.index"):
         print(f"Initializing PersistenceAPI with db_path={db_path}, dim={dim}")
         self.db_path = db_path
         self.dim = dim  # embedding dimensionality
+        self.index_path = index_path
         self._init_db()
         self.index = None  # Initialize as None, will be built on-demand
         self.id_map = {}
@@ -209,16 +212,45 @@ class PersistenceAPI:
         print(f"Operation completed for image: {file_path}")
         return image_id
 
+    def save_index(self):
+        """Save FAISS index to disk."""
+        if self.index is not None:
+            print(f"Saving FAISS index to {self.index_path}")
+            faiss.write_index(self.index, self.index_path)
+            # Save id_map alongside the index
+            with open(f"{self.index_path}.map", 'wb') as f:
+                pickle.dump(self.id_map, f)
+            print("Index saved successfully")
+
+    def load_index(self) -> bool:
+        """Load FAISS index from disk if it exists."""
+        if os.path.exists(self.index_path):
+            print(f"Loading existing FAISS index from {self.index_path}")
+            try:
+                self.index = faiss.read_index(self.index_path)
+                # Load id_map
+                with open(f"{self.index_path}.map", 'rb') as f:
+                    self.id_map = pickle.load(f)
+                print(f"Loaded index with {self.index.ntotal} vectors")
+                return True
+            except Exception as e:
+                print(f"Error loading index: {e}")
+                return False
+        return False
+
     # ------------------------------
     # Querying
     # ------------------------------
-    def find_similar_images(self, query_embedding: List[float], top_k: int = 5, is_text_query: bool = False) -> List[Dict]:
+    def find_similar_images(self, query_embedding: List[float], top_k: int = 5) -> List[Dict]:
         """Return top-k most similar images to a query embedding."""
         print(f"\nSearching for {top_k} similar images...")
         
+        # Try to load existing index first
         if self.index is None:
-            print("FAISS index not initialized, building now...")
-            self._rebuild_index()
+            if not self.load_index():
+                print("No existing index found, building new index...")
+                self._rebuild_index()
+                self.save_index()  # Save the newly built index
             
         if self.index.ntotal == 0:
             print("FAISS index is empty, rebuilding...")
