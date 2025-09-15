@@ -8,7 +8,7 @@ app = Flask(__name__)
 # Create templates directory if it doesn't exist
 os.makedirs('templates', exist_ok=True)
 
-def get_images_from_db(query: str = None, image_id: str = None):
+def get_images_from_db(query: str = None, image_id: str = None, top_k: int = 6, sensitivity: float = 1.5):
     """
     Fetch similar images based on query text or by finding similar images to a given image_id.
     Returns list of image data with URLs for display.
@@ -27,10 +27,10 @@ def get_images_from_db(query: str = None, image_id: str = None):
                 return []
                 
             # Use the file path to search for similar images
-            results = search_similar(image_path=result[0])
+            results = search_similar(image_path=result[0], top_k=top_k, sensitivity=sensitivity)
         else:
             # Use text query to search
-            results = search_similar(query_text=query)
+            results = search_similar(query_text=query, top_k=top_k, sensitivity=sensitivity)
 
         # Format results for display
         images = []
@@ -46,7 +46,16 @@ def get_images_from_db(query: str = None, image_id: str = None):
         print(f"Error fetching images: {e}")
         return []
 
-@app.route('/search')
+@app.route('/', methods=['GET'])
+def search_form():
+    """Render the search form."""
+    return render_template('grid.html', 
+                           images=[], 
+                           columns=3, 
+                           query=None, 
+                           reference_id=None)
+
+@app.route('/search', methods = ['POST'])
 def image_grid():
     """
     Display image grid based on search criteria.
@@ -54,23 +63,42 @@ def image_grid():
         q: text query for semantic search
         id: image_id to find similar images
     """
-    query = request.args.get('query')
-    image_id = request.args.get('id')
-    
-    if not query and not image_id:
-        # Return empty grid instead of error
-        return render_template('grid.html', 
-                            images=[], 
-                            columns=3, 
-                            query=None, 
-                            reference_id=None)
+    query = request.form.get('query')
+    matches = request.form.get('matches')
+    sensitivity = request.form.get('sensitivity')
+
+    print(f"Search parameters - query: {query}, id: {request.args.get('id')}, matches: {matches}, sensitivity: {sensitivity}")
+
+    # Validate matches parameter
+    try:
+        matches = int(matches) if matches else 10
+        if matches <= 0 or matches > 20:
+            matches = 10
+    except Exception:
+        matches = 10
+
+    # Validate sensitivity parameter
+    try:
+        sensitivity = float(sensitivity) if sensitivity else 1.5
+        if sensitivity <= 0 or sensitivity > 2:
+            sensitivity = 1.5
+    except Exception:
+        sensitivity = 1.5
+
+    images = []
+    if query:
+        images = get_images_from_db(
+            query=query, 
+            top_k=matches, 
+            sensitivity=sensitivity
+        )
         
-    images = get_images_from_db(query=query, image_id=image_id)
     return render_template('grid.html', 
                          images=images, 
                          columns=3, 
-                         query=query, 
-                         reference_id=image_id)
+                         query=query,
+                         matches=matches,
+                         sensitivity=sensitivity)
 
 @app.route('/images/<image_id>')
 def serve_image(image_id):

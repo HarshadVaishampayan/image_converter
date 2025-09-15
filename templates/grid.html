@@ -17,6 +17,16 @@
             border-radius: 4px;
             margin-bottom: 15px;
         }
+
+        .search-matches-input {
+            width: 10%;
+            max-width: 600px;
+            padding: 12px;
+            font-size: 16px;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
         
         .search-button {
             padding: 12px 30px;
@@ -68,12 +78,23 @@
 </head>
 <body>
     <div class="search-container">
-        <form method="GET" action="/search">
-            <input type="text" name="query" class="search-input" placeholder="Enter search query...">
-            <br>
-            <button type="submit" class="search-button" onclick="this.form.action='/search'">Search</button>
+        <form method="POST" action="/search">
+            <div class="form-row">
+                <label for="query">Search Query:</label>
+                <input type="text" id="query" name="query" class="search-input" placeholder="Enter search query..." value="{{ query or '' }}">
+            </div>
+            <div class="form-row">
+                <label for="matches">Matches:</label>
+                <input type="number" id="matches" name="matches" value="{{ matches or 6 }}">
+                
+                <label for="sensitivity">Sensitivity:</label>
+                <input type="number" step="0.1" id="sensitivity" name="sensitivity" value="{{ sensitivity or 1.5 }}">
+            </div>
+            <div class="form-row button-row">
+                <button type="submit" class="search-button">Search</button>
+                <button type="button" class="search-button" onclick="rebuildIndex();">Rebuild Index</button>
+            </div>
         </form>
-        <button type="button" class="search-button" onclick="rebuildIndex();">Rebuild Index</button>
     </div>
     
     <hr>

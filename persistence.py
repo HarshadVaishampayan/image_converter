@@ -264,7 +264,8 @@ class PersistenceAPI:
         print(f"Query vector shape: {query_vec.shape}")
         
         dists, idxs = self.index.search(query_vec, top_k * 2)  # Get more results as some might be captions
-        
+        print(f"Raw search results (distances): {dists}")
+        print(f"Raw search results (indices): {idxs}")
         results = []
         seen_images = set()  # Track unique images
         conn = sqlite3.connect(self.db_path)

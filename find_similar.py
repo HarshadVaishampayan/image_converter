@@ -11,7 +11,7 @@ from model_manager import ModelManager
 import caption_image
 import persistence
 
-def search_similar(query_text: str = None, image_path: str = None, force_rebuild: bool = False) -> List[Dict]:
+def search_similar(query_text: str = None, image_path: str = None, force_rebuild: bool = False, top_k: int = 6, sensitivity: float = 1.5) -> List[Dict]:
     """
     Search for similar images using either text query or image path.
     
@@ -19,22 +19,22 @@ def search_similar(query_text: str = None, image_path: str = None, force_rebuild
         query_text (str, optional): Text query to search with
         image_path (str, optional): Path to image to search with
         force_rebuild (bool): Whether to force rebuild the FAISS index
+        top_k (int): The number of top matches to return.
+        sensitivity (float): The score threshold to filter results.
         
     Returns:
         List[Dict]: List of results, each containing file_path, score, and captions
     """
     db = persistence.PersistenceAPI()
-    model_manager = ModelManager()
-    clip_model = model_manager.get_clip_model()
-    device = model_manager.device
-
     if force_rebuild:
         print("Forcing FAISS index rebuild...")
         db._rebuild_index()
         db.save_index()
-        return
 
     elif image_path:
+        model_manager = ModelManager()
+        clip_model = model_manager.get_clip_model()
+        device = model_manager.device
         if not os.path.exists(image_path):
             raise ValueError(f"Image not found: {image_path}")
         img = Image.open(image_path).convert('RGB')
@@ -42,6 +42,9 @@ def search_similar(query_text: str = None, image_path: str = None, force_rebuild
         embedding = embedding.cpu().numpy()
     
     elif query_text:
+        model_manager = ModelManager()
+        clip_model = model_manager.get_clip_model()
+        device = model_manager.device
         embedding = clip_model.encode([query_text], convert_to_tensor=True, device=device)
         embedding = embedding[0].cpu().numpy()
     else:
@@ -51,8 +54,14 @@ def search_similar(query_text: str = None, image_path: str = None, force_rebuild
     embedding = normalize_embedding(embedding)
     
     # Search for similar images
-    results = db.find_similar_images(embedding)
-    return results
+    results = db.find_similar_images(embedding, top_k=top_k)
+
+    # Filter results based on sensitivity
+    filtered_results = [r for r in results if r['score'] <= sensitivity]
+    
+    print(f"Found {len(results)} matches, returning {len(filtered_results)} after filtering with sensitivity {sensitivity}")
+    
+    return filtered_results
 
 def main():
     parser = argparse.ArgumentParser(description="Find similar images based on image or query string.")
