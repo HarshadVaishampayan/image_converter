@@ -102,5 +102,11 @@ def serve_image(image_id):
         print(f"Error serving image: {e}")
         return "Server error", 500
 
+@app.route('/rebuildindex', methods=['GET'])
+def rebuild_index():
+    # Code to rebuild the search index goes here
+    search_similar(force_rebuild=True)
+    return 'Done'
+
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

@@ -32,9 +32,9 @@ def search_similar(query_text: str = None, image_path: str = None, force_rebuild
         print("Forcing FAISS index rebuild...")
         db._rebuild_index()
         db.save_index()
+        return
 
-    # Generate embedding based on input type
-    if image_path:
+    elif image_path:
         if not os.path.exists(image_path):
             raise ValueError(f"Image not found: {image_path}")
         img = Image.open(image_path).convert('RGB')
