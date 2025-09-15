@@ -1,13 +1,58 @@
 import argparse
 import numpy as np
 import os
+from typing import List, Dict
 
 from sentence_transformers import SentenceTransformer
-import caption_image
-import persistence
 from PIL import Image
 from persistence import normalize_embedding
 from model_manager import ModelManager
+
+import caption_image
+import persistence
+
+def search_similar(query_text: str = None, image_path: str = None, force_rebuild: bool = False) -> List[Dict]:
+    """
+    Search for similar images using either text query or image path.
+    
+    Args:
+        query_text (str, optional): Text query to search with
+        image_path (str, optional): Path to image to search with
+        force_rebuild (bool): Whether to force rebuild the FAISS index
+        
+    Returns:
+        List[Dict]: List of results, each containing file_path, score, and captions
+    """
+    db = persistence.PersistenceAPI()
+    model_manager = ModelManager()
+    clip_model = model_manager.get_clip_model()
+    device = model_manager.device
+
+    if force_rebuild:
+        print("Forcing FAISS index rebuild...")
+        db._rebuild_index()
+        db.save_index()
+
+    # Generate embedding based on input type
+    if image_path:
+        if not os.path.exists(image_path):
+            raise ValueError(f"Image not found: {image_path}")
+        img = Image.open(image_path).convert('RGB')
+        embedding = clip_model.encode(img, convert_to_tensor=True, device=device)
+        embedding = embedding.cpu().numpy()
+    
+    elif query_text:
+        embedding = clip_model.encode([query_text], convert_to_tensor=True, device=device)
+        embedding = embedding[0].cpu().numpy()
+    else:
+        raise ValueError("Must provide either query_text or image_path")
+
+    # Normalize embedding
+    embedding = normalize_embedding(embedding)
+    
+    # Search for similar images
+    results = db.find_similar_images(embedding)
+    return results
 
 def main():
     parser = argparse.ArgumentParser(description="Find similar images based on image or query string.")
@@ -16,16 +61,6 @@ def main():
     parser.add_argument("--rebuild-index", action="store_true", help="Force rebuild of FAISS index")
     parser.add_argument("--interactive", action="store_true", help="Run in interactive mode")
     args = parser.parse_args()
-
-    db = persistence.PersistenceAPI()
-    model_manager = ModelManager()
-    clip_model = model_manager.get_clip_model()
-
-    # Rebuild index if requested
-    if args.rebuild_index:
-        print("Forcing FAISS index rebuild...")
-        db._rebuild_index()
-        db.save_index()
 
     if args.interactive:
         while True:
@@ -62,52 +97,25 @@ def main():
             except Exception as e:
                 print(f"Error: {e}")
     else:
-        # Detect environment and load models
-        env = caption_image.detect_environment()
-        print(f"Running in environment: {env}")
-        
-        # Load models
-        blip_name, clip_name, batch_size, beam_size, device = caption_image.load_models(env)
-        clip_model = SentenceTransformer(clip_name)
-        db = persistence.PersistenceAPI()
-        
-        # Optionally force rebuild index
-        if args.rebuild_index:
-            print("Forcing FAISS index rebuild...")
-            db._rebuild_index()
+        try:
+            results = search_similar(
+                query_text=args.query,
+                image_path=args.image,
+                force_rebuild=args.rebuild_index
+            )
+            
+            if not results:
+                print("No similar images found.")
+                return
 
-        # Generate embedding based on input type
-        if args.image:
-            # Use same image encoding as during insertion
-            img = Image.open(args.image).convert('RGB')
-            embedding = clip_model.encode(img, convert_to_tensor=True, device=device)
-            embedding = embedding.cpu().numpy()
-        
-        elif args.query:
-            # For text queries, we need to use CLIP's text encoder
-            # but ensure the embedding is normalized the same way
-            text_embedding = clip_model.encode(args.query, convert_to_tensor=True, device=device)
-            text_embedding = text_embedding.cpu().numpy()
-            # Optional: Add additional normalization to better align with image embeddings
-            embedding = text_embedding
-
-        # Normalize embedding using the same function as in persistence.py
-        embedding = normalize_embedding(embedding)
-        print(f"Normalized embedding shape: {embedding.shape}")
-
-        # Search for similar images
-        results = db.find_similar_images(embedding)
-        
-        # Print results
-        if not results:
-            print("No similar images found.")
-            return
-
-        for result in results:
-            print(f"Path: {result['file_path']}")
-            print(f"Score: {result['score']:.4f}")
-            print(f"Captions: {result['captions']}")
-            print("-" * 20)
+            for result in results:
+                print(f"Path: {result['file_path']}")
+                print(f"Score: {result['score']:.4f}")
+                print(f"Captions: {result['captions']}")
+                print("-" * 20)
+                
+        except Exception as e:
+            print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()

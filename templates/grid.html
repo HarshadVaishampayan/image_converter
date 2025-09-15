@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Image Grid</title>
+    <style>
+        .search-container {
+            padding: 20px;
+            text-align: center;
+        }
+        
+        .search-input {
+            width: 80%;
+            max-width: 600px;
+            padding: 12px;
+            font-size: 16px;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+        
+        .search-button {
+            padding: 12px 30px;
+            font-size: 16px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        
+        .search-button:hover {
+            background-color: #0056b3;
+        }
+        
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat({{ columns }}, 1fr);
+            gap: 20px;
+            padding: 20px;
+        }
+        .grid-item {
+            width: 100%;
+            aspect-ratio: 1;
+            overflow: hidden;
+        }
+        .grid-item img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+    </style>
+</head>
+<body>
+    <div class="search-container">
+        <form method="GET" action="/search">
+            <input type="text" name="query" class="search-input" placeholder="Enter search query...">
+            <br>
+            <button type="submit" class="search-button" onclick="this.form.action='/search'">Search</button>
+        </form>
+    </div>
+    
+    <hr>
+    
+    <div class="grid-container">
+        {% for image in images %}
+        <div class="grid-item" onclick="openOverlay('{{ image.url }}')">
+            <img src="{{ image.url }}" alt="Image {{ image.id }}">
+        </div>
+        {% endfor %}
+    </div>
+
+    <div id="imageOverlay" class="overlay" onclick="closeOverlay()">
+        <div class="overlay-content">
+            <img id="overlayImage" src="" alt="Enlarged image">
+        </div>
+    </div>
+
+    <script>
+        function openOverlay(imageSrc) {
+            event.stopPropagation();
+            document.getElementById('overlayImage').src = imageSrc;
+            document.getElementById('imageOverlay').style.display = 'block';
+        }
+
+        function closeOverlay() {
+            document.getElementById('imageOverlay').style.display = 'none';
+        }
+    </script>
+</body>
+</html>
