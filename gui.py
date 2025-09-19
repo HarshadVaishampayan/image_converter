@@ -15,6 +15,7 @@ def get_images_from_db(query: str = None, image_id: str = None, top_k: int = 6, 
     """
     try:
         if image_id:
+            print(f"Searching for images similar to image ID: {image_id}")
             # First get the file path for the reference image
             conn = sqlite3.connect('images.db')
             cursor = conn.cursor()
@@ -64,10 +65,11 @@ def image_grid():
         id: image_id to find similar images
     """
     query = request.form.get('query')
+    image_id = request.form.get('image_id')
     matches = request.form.get('matches')
     sensitivity = request.form.get('sensitivity')
 
-    print(f"Search parameters - query: {query}, id: {request.args.get('id')}, matches: {matches}, sensitivity: {sensitivity}")
+    print(f"Search parameters - query: {query}, image_id: {image_id}, matches: {matches}, sensitivity: {sensitivity}")
 
     # Validate matches parameter
     try:
@@ -89,6 +91,12 @@ def image_grid():
     if query:
         images = get_images_from_db(
             query=query, 
+            top_k=matches, 
+            sensitivity=sensitivity
+        )
+    if image_id:
+        images = get_images_from_db(
+            image_id=image_id,
             top_k=matches, 
             sensitivity=sensitivity
         )
