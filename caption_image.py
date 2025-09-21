@@ -2,7 +2,7 @@ from transformers import (
     BlipProcessor,
     BlipForConditionalGeneration,
     AutoProcessor,
-    Blip2ForConditionalGeneration
+    Blip2ForConditionalGeneration,
 )
 from sentence_transformers import SentenceTransformer
 from PIL import Image, UnidentifiedImageError
@@ -10,15 +10,16 @@ from typing import Callable, List, Dict, Any, Generator
 from persistence import PersistenceAPI
 from model_manager import ModelManager, detect_environment, load_models
 import torch
+from torch.utils.data import DataLoader, Dataset
 import json
 import os
 import time
 import traceback
 import argparse
-import concurrent.futures
+
 
 # ------------------------------
-# Process in batches
+# Helper Functions and Classes
 # ------------------------------
 def _get_image_paths(path: str) -> List[str]:
     """Helper function to recursively get all image paths."""
@@ -33,20 +34,53 @@ def _get_image_paths(path: str) -> List[str]:
                     image_paths.append(os.path.join(root, file))
     return image_paths
 
+
+class ImageDataset(Dataset):
+    """Custom PyTorch Dataset for loading images from a list of paths."""
+
+    def __init__(self, image_paths):
+        self.image_paths = image_paths
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        image_path = self.image_paths[idx]
+        try:
+            image = Image.open(image_path).convert("RGB")
+            return image, image_path
+        except Exception as e:
+            # Return None for path to indicate failure
+            return None, image_path
+
+
+def collate_fn(batch):
+    """Custom collate function to filter out items where the image failed to load."""
+    # A batch is a list of tuples (image, path)
+    # Filter out tuples where the image is None
+    batch = [item for item in batch if item[0] is not None]
+    if not batch:
+        return None, None
+    # Unzip the filtered batch
+    images, paths = zip(*batch)
+    return list(images), list(paths)
+
+
+# ------------------------------
+# Main Processing Function
+# ------------------------------
 def process_folder_parallel_blip(
     path: str,
     consumers: List[Callable[[Dict[str, Any]], None]] = None,
     cache_file: str = None,
     max_workers: int = None,
 ) -> Generator:
-    """Process images in a directory recursively using BLIP for captioning."""
+    """
+    Process images in a directory recursively using BLIP for captioning,
+    with a parallel data loading pipeline.
+    """
+    total_start_time = time.time()
     print(f"\nProcessing path: {path}")
-    start_time = time.time()
-    processed_count = 0
-
-    if max_workers is None:
-        max_workers = os.cpu_count()
-        print(f"Using default max_workers: {max_workers}")
 
     # Get cached models and parameters
     model_manager = ModelManager()
@@ -60,61 +94,91 @@ def process_folder_parallel_blip(
         print(f"Error: No valid images found in {path}")
         return
 
-    print(f"Found {len(paths_to_process)} images to process with {max_workers} workers")
+    # Setup DataLoader for parallel loading
+    # Use a small, fixed number of workers to prevent memory thrashing from aggressive prefetching
+    num_workers = 1 
+    
+    dataset = ImageDataset(paths_to_process)
+    data_loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        pin_memory=True if "cuda" in str(device) else False,
+        prefetch_factor=2,
+    )
 
-    def process_image(image_path):
+    print(f"Found {len(paths_to_process)} images. Starting processing with batch size {batch_size} and {num_workers} data loader workers.")
+    
+    processed_count = 0
+    loop_start_time = time.time()
+
+    for batch_images, batch_paths in data_loader:
+        batch_load_time = time.time()
+        
+        if not batch_images:
+            print("[WARNING] DataLoader returned an empty batch. Skipping.")
+            continue
+
+        print(f"\n--- Loaded batch of {len(batch_images)} images in {batch_load_time - loop_start_time:.2f}s ---")
+
         try:
-            print(f"Processing: {image_path}")
-            # Load and process image
-            image = Image.open(image_path).convert("RGB")
+            # --- Preprocessing and Model Inference with Mixed Precision ---
+            preprocessing_start_time = time.time()
+            inputs = processor(images=batch_images, return_tensors="pt").to(device)
+            preprocessing_end_time = time.time()
+            print(f"  - Preprocessing for batch took {preprocessing_end_time - preprocessing_start_time:.2f}s")
 
-            # Generate captions using BLIP
-            inputs = processor(images=image, return_tensors="pt").to(device)
-            outputs = model.generate(
-                **inputs, num_beams=beam_size, num_return_sequences=beam_size, max_new_tokens=100
-            )
-            captions = [
+            inference_start_time = time.time()
+            with torch.autocast(device_type=str(device).split(":")[0]):
+                # Generate captions using BLIP
+                outputs = model.generate(
+                    **inputs, num_beams=beam_size, num_return_sequences=beam_size, max_new_tokens=100
+                )
+                
+                # Generate embeddings using CLIP
+                embeddings = clip_model.encode(
+                    batch_images, convert_to_tensor=True, device=device
+                )
+
+            # Decode captions for each image in the batch
+            all_captions = [
                 processor.decode(output, skip_special_tokens=True) for output in outputs
             ]
+            embeddings = embeddings.cpu().numpy()
 
-            # Generate embedding using CLIP
-            embedding = clip_model.encode(
-                [image], convert_to_tensor=True, device=device
-            )
-            embedding = embedding[0].cpu().numpy()  # Convert to numpy array
+            inference_end_time = time.time()
+            print(f"  - Inference for batch took {inference_end_time - inference_start_time:.2f}s")
 
-            # Create result dictionary with embedding
-            result = {
-                "image_path": image_path,
-                "captions": [{"text": cap} for cap in captions],
-                "embedding": embedding,  # Add embedding to result
-                "width": image.width,
-                "height": image.height,
-                "metadata": {
-                    "env": detect_environment(),
-                    "device": str(device),
-                    "batch_size": batch_size,
-                    "beam_size": beam_size,
-                },
-            }
-            return result
+            # --- Process Results ---
+            # Group captions by image (since num_return_sequences > 1)
+            captions_per_image = [
+                all_captions[j : j + beam_size]
+                for j in range(0, len(all_captions), beam_size)
+            ]
 
-        except Exception as e:
-            print(f"[ERROR] Processing {image_path} failed: {e}")
-            traceback.print_exc()
-            return None
+            for idx, image_path in enumerate(batch_paths):
+                image = batch_images[idx]
+                captions = captions_per_image[idx]
+                embedding = embeddings[idx]
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_path = {
-            executor.submit(process_image, path): path for path in paths_to_process
-        }
+                result = {
+                    "image_path": image_path,
+                    "captions": [{"text": cap} for cap in captions],
+                    "embedding": embedding,
+                    "width": image.width,
+                    "height": image.height,
+                    "metadata": {
+                        "env": detect_environment(),
+                        "device": str(device),
+                        "batch_size": batch_size,
+                        "beam_size": beam_size,
+                    },
+                }
 
-        for future in concurrent.futures.as_completed(future_to_path):
-            result = future.result()
-            if result:
                 processed_count += 1
-                image_path = result["image_path"]
-                # Notify consumers safely
+
                 if consumers:
                     for consumer in consumers:
                         try:
@@ -125,22 +189,24 @@ def process_folder_parallel_blip(
                             )
                             traceback.print_exc()
 
-                # Update cache
                 if cache_file:
                     with open(cache_file, "a") as f:
                         json.dump(
-                            {
-                                "image_path": result["image_path"],
-                                "captions": result["captions"],
-                            },
-                            f,
+                            {"image_path": result["image_path"], "captions": result["captions"]}, f
                         )
                         f.write("\n")
 
                 yield result
-    
-    end_time = time.time()
-    print(f"Processed {processed_count} images in {end_time - start_time:.2f} seconds.")
+
+        except Exception as e:
+            print(f"[ERROR] Batch processing failed: {e}")
+            traceback.print_exc()
+        
+        loop_start_time = time.time() # Reset timer for the next batch load measurement
+
+    total_end_time = time.time()
+    print(f"\n--- Processing Summary ---")
+    print(f"Processed {processed_count} images in {total_end_time - total_start_time:.2f} seconds.")
 
 
 def normalize(embedding):

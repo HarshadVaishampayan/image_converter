@@ -22,14 +22,23 @@ def detect_environment() -> str:
     else:
         return "desktop"
 
-def load_models(env: str):
+def get_device() -> torch.device:
+    """Detects and returns the appropriate device for PyTorch."""
+    if torch.cuda.is_available():
+        print("Using CUDA device")
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        print("Using MPS device")
+        return torch.device("mps")
+    print("CUDA and MPS not available, using CPU")
+    return torch.device("cpu")
+
+def load_models(env: str, device: torch.device):
     """Load BLIP + CLIP models and config depending on environment type."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
     if env == "desktop":
         blip_name = "Salesforce/blip-image-captioning-large"
         clip_name = "clip-ViT-B-32"
-        batch_size = 2
+        batch_size = 10
         beam_size = 2
     else:
         blip_name = "Salesforce/blip-image-captioning-small"
@@ -37,7 +46,7 @@ def load_models(env: str):
         batch_size = 2
         beam_size = 2
 
-    return blip_name, clip_name, batch_size, beam_size, device
+    return blip_name, clip_name, batch_size, beam_size
 
 class ModelManager:
     """Singleton class to manage model instances."""
@@ -52,10 +61,10 @@ class ModelManager:
     def __init__(self):
         if not self.initialized:
             print("Initializing ModelManager...")
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.device = get_device()
             self.env = detect_environment()
             # Load model configuration
-            self.blip_name, self.clip_name, self.batch_size, self.beam_size, _ = load_models(self.env)
+            self.blip_name, self.clip_name, self.batch_size, self.beam_size = load_models(self.env, self.device)
             # Initialize model placeholders
             self.blip_processor = None
             self.blip_model = None
@@ -63,7 +72,7 @@ class ModelManager:
             self.blip2_processor = None
             self.blip2_model = None
             self.initialized = True
-            print(f"ModelManager initialized with beam_size={self.beam_size}, batch_size={self.batch_size}")
+            print(f"ModelManager initialized with beam_size={self.beam_size}, batch_size={self.batch_size} on device {self.device}")
     
     def get_clip_model(self):
         if self.clip_model is None:
@@ -75,14 +84,14 @@ class ModelManager:
         """Get BLIP models and their configuration parameters."""
         if self.blip_model is None:
             print("Loading BLIP models...")
-            self.blip_processor = BlipProcessor.from_pretrained(self.blip_name)
+            self.blip_processor = BlipProcessor.from_pretrained(self.blip_name, useFast=True)
             self.blip_model = BlipForConditionalGeneration.from_pretrained(self.blip_name).to(self.device)
         return self.blip_processor, self.blip_model, self.beam_size, self.batch_size
 
     def get_blip2_models(self):
         if self.blip2_model is None:
             print("Loading BLIP-2 models...")
-            self.blip2_processor = AutoProcessor.from_pretrained("Salesforce/blip2-opt-6.7b-coco")
+            self.blip2_processor = AutoProcessor.from_pretrained("Salesforce/blip2-opt-6.7b-coco", useFast=True)
             self.blip2_model = Blip2ForConditionalGeneration.from_pretrained(
                 "Salesforce/blip2-opt-6.7b-coco",
                 device_map="auto"
