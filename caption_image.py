@@ -12,8 +12,10 @@ from model_manager import ModelManager, detect_environment, load_models
 import torch
 import json
 import os
+import time
 import traceback
 import argparse
+import concurrent.futures
 
 # ------------------------------
 # Process in batches
@@ -35,11 +37,17 @@ def process_folder_parallel_blip(
     path: str,
     consumers: List[Callable[[Dict[str, Any]], None]] = None,
     cache_file: str = None,
-    max_workers: int = 4
+    max_workers: int = None,
 ) -> Generator:
     """Process images in a directory recursively using BLIP for captioning."""
     print(f"\nProcessing path: {path}")
-    
+    start_time = time.time()
+    processed_count = 0
+
+    if max_workers is None:
+        max_workers = os.cpu_count()
+        print(f"Using default max_workers: {max_workers}")
+
     # Get cached models and parameters
     model_manager = ModelManager()
     processor, model, beam_size, batch_size = model_manager.get_blip_models()
@@ -52,25 +60,29 @@ def process_folder_parallel_blip(
         print(f"Error: No valid images found in {path}")
         return
 
-    print(f"Found {len(paths_to_process)} images to process")
+    print(f"Found {len(paths_to_process)} images to process with {max_workers} workers")
 
-    for image_path in paths_to_process:
+    def process_image(image_path):
         try:
             print(f"Processing: {image_path}")
             # Load and process image
             image = Image.open(image_path).convert("RGB")
-            
+
             # Generate captions using BLIP
             inputs = processor(images=image, return_tensors="pt").to(device)
-            outputs = model.generate(**inputs, num_beams=beam_size, 
-                                  num_return_sequences=beam_size, max_new_tokens=100)
-            captions = [processor.decode(output, skip_special_tokens=True) 
-                       for output in outputs]
+            outputs = model.generate(
+                **inputs, num_beams=beam_size, num_return_sequences=beam_size, max_new_tokens=100
+            )
+            captions = [
+                processor.decode(output, skip_special_tokens=True) for output in outputs
+            ]
 
             # Generate embedding using CLIP
-            embedding = clip_model.encode([image], convert_to_tensor=True, device=device)
+            embedding = clip_model.encode(
+                [image], convert_to_tensor=True, device=device
+            )
             embedding = embedding[0].cpu().numpy()  # Convert to numpy array
-            
+
             # Create result dictionary with embedding
             result = {
                 "image_path": image_path,
@@ -85,30 +97,51 @@ def process_folder_parallel_blip(
                     "beam_size": beam_size,
                 },
             }
-
-            # Notify consumers safely
-            if consumers:
-                for consumer in consumers:
-                    try:
-                        consumer(result)
-                    except Exception as e:
-                        print(f"[WARNING] Consumer {consumer.__name__} failed for {image_path}: {e}")
-                        traceback.print_exc()
-
-            # Update cache
-            if cache_file:
-                with open(cache_file, "a") as f:
-                    json.dump({
-                        "image_path": result["image_path"],
-                        "captions": result["captions"]
-                    }, f)
-                    f.write("\n")
-
-            yield result
+            return result
 
         except Exception as e:
             print(f"[ERROR] Processing {image_path} failed: {e}")
             traceback.print_exc()
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_path = {
+            executor.submit(process_image, path): path for path in paths_to_process
+        }
+
+        for future in concurrent.futures.as_completed(future_to_path):
+            result = future.result()
+            if result:
+                processed_count += 1
+                image_path = result["image_path"]
+                # Notify consumers safely
+                if consumers:
+                    for consumer in consumers:
+                        try:
+                            consumer(result)
+                        except Exception as e:
+                            print(
+                                f"[WARNING] Consumer {consumer.__name__} failed for {image_path}: {e}"
+                            )
+                            traceback.print_exc()
+
+                # Update cache
+                if cache_file:
+                    with open(cache_file, "a") as f:
+                        json.dump(
+                            {
+                                "image_path": result["image_path"],
+                                "captions": result["captions"],
+                            },
+                            f,
+                        )
+                        f.write("\n")
+
+                yield result
+    
+    end_time = time.time()
+    print(f"Processed {processed_count} images in {end_time - start_time:.2f} seconds.")
+
 
 def normalize(embedding):
     """
@@ -204,7 +237,6 @@ if __name__ == "__main__":
         path=args.image_path,
         consumers=[print_consumer, persist_consumer],
         cache_file=cache,
-        max_workers=4
     ):
         pass
 

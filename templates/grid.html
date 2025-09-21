@@ -1,172 +1,74 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Image Grid</title>
-    <style>
-        .search-container {
-            padding: 20px;
-            text-align: center;
-        }
-        
-        .search-input {
-            width: 80%;
-            max-width: 600px;
-            padding: 12px;
-            font-size: 16px;
-            border: 2px solid #ddd;
-            border-radius: 4px;
-            margin-bottom: 15px;
-        }
-
-        .search-matches-input {
-            width: 10%;
-            max-width: 600px;
-            padding: 12px;
-            font-size: 16px;
-            border: 2px solid #ddd;
-            border-radius: 4px;
-            margin-bottom: 15px;
-        }
-        
-        .search-button {
-            padding: 12px 30px;
-            font-size: 16px;
-            background-color: #007bff;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-        }
-        
-        .search-button:hover {
-            background-color: #0056b3;
-        }
-        
-        .grid-container {
-            display: grid;
-            grid-template-columns: repeat({{ columns }}, 1fr);
-            gap: 20px;
-            padding: 20px;
-        }
-        .grid-item {
-            width: 100%;
-            aspect-ratio: 1;
-            overflow: hidden;
-            position: relative;
-        }
-        .grid-item img {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-        }
-        .image-info {
-            position: absolute;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            background: rgba(0,0,0,0.7);
-            color: white;
-            padding: 5px;
-            font-size: 12px;
-        }
-        .search-info {
-            padding: 20px;
-            margin-bottom: 20px;
-            background: #f0f0f0;
-        }
-        .reference-image {
-            width: 50px;
-            height: 50px;
-            object-fit: cover;
-            margin-right: 10px;
-            vertical-align: middle;
-        }
-        .find-similar-btn {
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            background: rgba(0,0,0,0.7);
-            color: white;
-            border: none;
-            padding: 5px 10px;
-            cursor: pointer;
-            display: none;
-        }
-        .grid-item:hover .find-similar-btn {
-            display: block;
-        }
-    </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Browser</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <div class="search-container">
-        <form method="POST" action="/search" id="searchForm">
-            <div style="display: flex; align-items: center;">
-                {% if reference_image %}
-                <img src="{{ reference_image.url }}" class="reference-image" alt="Reference image">
-                {% endif %}
-                <input type="text" name="query" value="{{ query or '' }}" class="search-input" placeholder="Enter search query...">
-                <input type="hidden" name="image_id" value="">
-            </div>
-            <div class="form-row">
-                <label for="matches">Matches:</label>
-                <input type="number" id="matches" name="matches" value="{{ matches or 6 }}">
-                
-                <label for="sensitivity">Sensitivity:</label>
-                <input type="number" step="0.1" id="sensitivity" name="sensitivity" value="{{ sensitivity or 1.5 }}">
-            </div>
-            <div class="form-row button-row">
-                <button type="submit" class="search-button">Search</button>
-                <button type="button" class="search-button" onclick="rebuildIndex();">Rebuild Index</button>
-            </div>
-        </form>
-    </div>
-    
-    <hr>
-    
-    <div class="search-info">
-        {% if query %}
-            <h2>Search results for: "{{ query }}"</h2>
-        {% elif reference_id %}
-            <h2>Similar images to ID: {{ reference_id }}</h2>
-        {% endif %}
-    </div>
-    <div class="grid-container">
-        {% for image in images %}
-        <div class="grid-item">
-            <img src="{{ image.url }}" alt="Image {{ image.id }}">
-            <button onclick="findSimilar('{{ image.id }}', {{ matches }}, {{ sensitivity }})" 
-                    class="find-similar-btn">Find Similar</button>
-            <div class="image-info">
-                Score: {{ image.score }}
-                {% if image.captions %}
-                <br>{{ image.captions[0] }}
-                {% endif %}
-            </div>
-        </div>
-        {% endfor %}
+    <div class="header">
+        <div class="logo">Image Browser</div>
     </div>
 
-    <div id="imageOverlay" class="overlay" onclick="closeOverlay()">
-        <div class="overlay-content">
-            <img id="overlayImage" src="" alt="Enlarged image">
+    <div class="container">
+        <form method="POST" action="/search" id="searchForm">
+            <div class="search-container">
+                <input type="text" name="query" value="{{ query or '' }}" class="search-input" placeholder="Search for images...">
+                <input type="hidden" name="image_id" value="">
+                <div class="form-row">
+                    <label for="matches">Matches:</label>
+                    <input type="number" id="matches" name="matches" value="{{ matches or 10 }}" min="1" max="50">
+                </div>
+                <div class="form-row">
+                    <label for="sensitivity">Sensitivity:</label>
+                    <input type="number" step="0.1" id="sensitivity" name="sensitivity" value="{{ sensitivity or 1.5 }}" min="0.1" max="2.0">
+                </div>
+                <button type="submit" class="button">Search</button>
+                <button type="button" class="button secondary-button" onclick="rebuildIndex();">Rebuild Index</button>
+            </div>
+        </form>
+
+        <div class="search-info">
+            {% if query %}
+                Showing results for: <strong>"{{ query }}"</strong>
+            {% elif reference_id %}
+                Showing similar images to ID: <strong>{{ reference_id }}</strong>
+            {% else %}
+                Search Results
+            {% endif %}
         </div>
+
+        <div class="grid-container">
+            {% for image in images %}
+            <div class="grid-item" onclick="openModal('{{ image.url }}')">
+                <img src="{{ image.url }}" alt="Image {{ image.id }}">
+                <div class="image-info">
+                    {% if image.captions %}
+                    <div class="caption">{{ image.captions[0] }}</div>
+                    {% endif %}
+                    <div class="score">Match Score: {{ image.score }}</div>
+                </div>
+                <button onclick="event.stopPropagation(); findSimilar('{{ image.id }}', document.getElementById('matches').value, document.getElementById('sensitivity').value)" 
+                        class="find-similar-btn">Find Similar</button>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div id="imageModal" class="modal">
+        <span class="close" onclick="closeModal()">&times;</span>
+        <img class="modal-content" id="modalImage">
     </div>
 
     <script>
-        function openOverlay(imageSrc) {
-            event.stopPropagation();
-            document.getElementById('overlayImage').src = imageSrc;
-            document.getElementById('imageOverlay').style.display = 'block';
-        }
-
-        function closeOverlay() {
-            document.getElementById('imageOverlay').style.display = 'none';
-        }
-
         function rebuildIndex() {
             fetch('/rebuildindex')
                 .then(response => response.text())
-                .then(data => alert(data));
+                .then(data => alert('Index rebuild started. This may take a while.'));
         }
 
         function findSimilar(imageId, matches, sensitivity) {
@@ -174,8 +76,27 @@
             form.querySelector('input[name="image_id"]').value = imageId;
             form.querySelector('input[name="matches"]').value = matches;
             form.querySelector('input[name="sensitivity"]').value = sensitivity;
-            form.querySelector('input[name="query"]').value = '';  // Clear query when searching by image
+            form.querySelector('input[name="query"]').value = '';
             form.submit();
+        }
+
+        // Modal script
+        const modal = document.getElementById('imageModal');
+        const modalImg = document.getElementById("modalImage");
+
+        function openModal(src) {
+            modal.style.display = "flex";
+            modalImg.src = src;
+        }
+
+        function closeModal() {
+            modal.style.display = "none";
+        }
+        
+        window.onclick = function(event) {
+            if (event.target == modal) {
+                closeModal();
+            }
         }
     </script>
 </body>
