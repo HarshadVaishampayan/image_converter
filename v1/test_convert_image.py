@@ -1,40 +1,4 @@
-def test_convert_image_greyscale():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = os.path.join(tmpdir, 'input.jpg')
-        output_path = os.path.join(tmpdir, 'output_grey.jpeg')
-        create_test_image(input_path, size=(100, 100))
-        params = {
-            'input_path': input_path,
-            'output_path': output_path,
-            'width': '50',
-            'format': 'jpeg',
-            'color': 'greyscale'
-        }
-        convert_image(params)
-        assert os.path.exists(output_path)
-        with Image.open(output_path) as out_img:
-            assert out_img.mode == 'L'
-            assert out_img.size[0] == 50
-            assert out_img.format == 'JPEG'
-
-def test_convert_image_rgb():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = os.path.join(tmpdir, 'input.jpg')
-        output_path = os.path.join(tmpdir, 'output_rgb.jpeg')
-        create_test_image(input_path, size=(100, 100))
-        params = {
-            'input_path': input_path,
-            'output_path': output_path,
-            'width': '50',
-            'format': 'jpeg',
-            'color': 'rgb'
-        }
-        convert_image(params)
-        assert os.path.exists(output_path)
-        with Image.open(output_path) as out_img:
-            assert out_img.mode == 'RGB'
-            assert out_img.size[0] == 50
-            assert out_img.format == 'JPEG'
+import unittest
 import os
 import tempfile
 from PIL import Image
@@ -80,6 +44,44 @@ def test_convert_image_with_height():
         assert os.path.exists(output_path)
         with Image.open(output_path) as out_img:
             assert out_img.size == (80, 60)
+            assert out_img.format == 'JPEG'
+
+def test_convert_image_greyscale():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_path = os.path.join(tmpdir, 'input.jpg')
+        output_path = os.path.join(tmpdir, 'output_grey.jpeg')
+        create_test_image(input_path, size=(100, 100))
+        params = {
+            'input_path': input_path,
+            'output_path': output_path,
+            'width': '50',
+            'format': 'jpeg',
+            'color': 'greyscale'
+        }
+        convert_image(params)
+        assert os.path.exists(output_path)
+        with Image.open(output_path) as out_img:
+            assert out_img.mode == 'L'
+            assert out_img.size[0] == 50
+            assert out_img.format == 'JPEG'
+
+def test_convert_image_rgb():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_path = os.path.join(tmpdir, 'input.jpg')
+        output_path = os.path.join(tmpdir, 'output_rgb.jpeg')
+        create_test_image(input_path, size=(100, 100))
+        params = {
+            'input_path': input_path,
+            'output_path': output_path,
+            'width': '50',
+            'format': 'jpeg',
+            'color': 'rgb'
+        }
+        convert_image(params)
+        assert os.path.exists(output_path)
+        with Image.open(output_path) as out_img:
+            assert out_img.mode == 'RGB'
+            assert out_img.size[0] == 50
             assert out_img.format == 'JPEG'
 
 def test_invalid_format():

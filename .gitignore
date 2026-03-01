@@ -212,3 +212,8 @@ processed_cache.jsonl
 images.db
 faiss.index
 faiss.index.map
+
+# Project specific ignores
+.DS_Store
+chroma_db/
+**/.DS_Store

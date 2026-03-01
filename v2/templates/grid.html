@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Browser</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        /* Modal specific styles */
+        .modal-content-wrapper {
+            position: relative;
+            max-width: 90vw;
+            max-height: 90vh;
+            display: inline-block; /* Wraps tight around image */
+        }
+
+        .info-icon-container {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            z-index: 1010;
+        }
+
+        .info-icon {
+            font-size: 1.5rem;
+            cursor: help;
+            background: rgba(0,0,0,0.6);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            border: 1px solid rgba(255,255,255,0.3);
+            transition: background 0.2s;
+        }
+        
+        .info-icon:hover {
+            background: rgba(0,0,0,0.9);
+        }
+
+        .description-tooltip {
+            display: none; /* Hidden by default */
+            position: absolute;
+            bottom: 50px;
+            right: 0;
+            width: 350px;
+            max-width: 80vw;
+            background: rgba(0, 0, 0, 0.95);
+            color: #eee;
+            padding: 1rem;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            line-height: 1.5;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            border: 1px solid #444;
+            white-space: normal;
+        }
+
+        /* Show on hover */
+        .info-icon:hover + .description-tooltip {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo">Image Browser</div>
+    </div>
+
+    <div class="container">
+        <form method="POST" action="/search" id="searchForm">
+            <div class="search-container">
+                <input type="text" name="query" value="{{ query or '' }}" class="search-input" placeholder="Search for images...">
+                <input type="hidden" name="image_id" value="">
+                <div class="form-row">
+                    <label for="matches">Matches:</label>
+                    <input type="number" id="matches" name="matches" value="{{ matches or 10 }}" min="1" max="50">
+                </div>
+                <div class="form-row">
+                    <label for="sensitivity">Sensitivity:</label>
+                    <input type="number" step="0.1" id="sensitivity" name="sensitivity" value="{{ sensitivity or 1.5 }}" min="0.1" max="2.0">
+                </div>
+                <button type="submit" class="button">Search</button>
+                <button type="button" class="button secondary-button" onclick="rebuildIndex();">Rebuild Index</button>
+            </div>
+        </form>
+
+        <div class="search-info">
+            {% if query %}
+                Showing results for: <strong>"{{ query }}"</strong>
+            {% elif reference_id %}
+                Showing similar images to ID: <strong>{{ reference_id }}</strong>
+            {% else %}
+                Search Results
+            {% endif %}
+        </div>
+
+        <div class="grid-container">
+            {% for image in images %}
+            <div class="grid-item" onclick="openModal('{{ image.url }}', '{{ image.description | replace('\'', '\\\'') | replace('\n', ' ') }}')">
+                <img src="{{ image.url }}" alt="Image {{ image.id }}">
+                <div class="image-info">
+                    {% if image.captions %}
+                    <div class="caption">{{ image.captions[0] }}</div>
+                    {% endif %}
+                    <div class="score">Match Score: {{ image.score }}</div>
+                </div>
+                <button onclick="event.stopPropagation(); findSimilar('{{ image.id }}', document.getElementById('matches').value, document.getElementById('sensitivity').value)" 
+                        class="find-similar-btn">Find Similar</button>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div id="imageModal" class="modal">
+        <span class="close" onclick="closeModal()">&times;</span>
+        <div class="modal-content-wrapper">
+            <img class="modal-content" id="modalImage">
+            <div class="info-icon-container">
+                <span class="info-icon">i</span>
+                <div class="description-tooltip" id="modalDescription"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function rebuildIndex() {
+            fetch('/rebuildindex')
+                .then(response => response.text())
+                .then(data => alert('Index rebuild started. This may take a while.'));
+        }
+
+        function findSimilar(imageId, matches, sensitivity) {
+            const form = document.getElementById('searchForm');
+            form.querySelector('input[name="image_id"]').value = imageId;
+            form.querySelector('input[name="matches"]').value = matches;
+            form.querySelector('input[name="sensitivity"]').value = sensitivity;
+            form.querySelector('input[name="query"]').value = '';
+            form.submit();
+        }
+
+        // Modal script
+        const modal = document.getElementById('imageModal');
+        const modalImg = document.getElementById("modalImage");
+        const modalDesc = document.getElementById("modalDescription");
+
+        function openModal(src, description) {
+            modal.style.display = "flex";
+            modalImg.src = src;
+            modalDesc.textContent = description || "No description available.";
+        }
+
+        function closeModal() {
+            modal.style.display = "none";
+        }
+        
+        window.onclick = function(event) {
+            if (event.target == modal) {
+                closeModal();
+            }
+        }
+    </script>
+</body>
+</html>
