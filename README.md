@@ -125,18 +125,33 @@ Delete an entire ChromaDB collection for a given embedding model.
 python image_cli.py purge --model <siglip|clip>
 ```
 
-## Project Structure (v2)
+## Project Structure
 
--   `v2/image_cli.py`: Main CLI entry point for all operations.
--   `v2/caption_image.py`: Handles image ingestion, description generation (Ollama/Florence-2), and embedding (SigLIP/CLIP).
--   `v2/persistence.py`: Manages ChromaDB interactions, including insert, update, retrieve, and cleanup operations.
--   `v2/model_manager.py`: Singleton for loading and managing AI models (embedding, description) efficiently.
--   `v2/find_similar.py`: Implements the hybrid search logic.
--   `v2/gui.py`: Flask application for the web interface.
--   `v2/metrics.py`: Singleton for tracking performance metrics during ingestion.
--   `v2/templates/` & `v2/static/`: Web UI templates and static assets.
--   `v2/requirements*.txt`: Python dependency lists.
--   `v1/`: Contains the original version of the project files.
+-   `v2/`: Contains the current, actively developed codebase.
+    -   `image_cli.py`: Main CLI entry point for all operations.
+    -   `caption_image.py`: Handles image ingestion, description generation (Ollama/Florence-2), and embedding (SigLIP/CLIP).
+    -   `persistence.py`: Manages ChromaDB interactions, including insert, update, retrieve, and cleanup operations.
+    -   `model_manager.py`: Singleton for loading and managing AI models (embedding, description) efficiently.
+    -   `find_similar.py`: Implements the hybrid search logic.
+    -   `gui.py`: Flask application for the web interface.
+    -   `metrics.py`: Singleton for tracking performance metrics during ingestion.
+    -   `templates/` & `static/`: Web UI templates and static assets.
+    -   `requirements*.txt`: Python dependency lists.
+-   `v1/`: Contains the previous version of the project files, preserved for historical context and reference.
+    -   `README.md`: Original project overview.
+    -   `caption_image.py`: Original script for image captioning.
+    -   `convert_image.py`: Original image conversion utility.
+    -   `describe_image.py`: Original script for image description.
+    -   `dump_db.py`: Utility to dump database contents.
+    -   `find_similar.py`: Original script for finding similar images using FAISS.
+    -   `gui.py`: Original Flask web application.
+    -   `image_cli.py`: Original CLI for managing v1 tasks.
+    -   `model_manager.py`: Original model loading and management.
+    -   `persistence.py`: Original data persistence layer using SQLite and FAISS.
+    -   `requirements*.txt`: Original Python dependency lists.
+    -   `static/` & `templates/`: Original web assets.
+    -   `core/`: Contains original embedding and FAISS search modules.
+    -   `tests/`: Contains original test files.
 -   `TODO/`: Markdown files outlining future development tasks.
 -   `understanding.md`: Detailed internal document explaining v1 architecture and initial v2 goals.
 
