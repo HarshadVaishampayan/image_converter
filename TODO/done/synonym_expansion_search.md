@@ -52,4 +52,3 @@ def search_similar(..., expand_query=False, synonym_model="llama3.2:1b"):
     *   *Mitigation:* Use the smallest possible model (`qwen:0.5b` or `llama3.2:1b`).
 *   **Drift:** Synonyms might get too loose ("Ocean" -> "Blue" -> "Sad").
     *   *Mitigation:* Limit expansion to ~3-5 words and keep the prompt strict ("direct synonyms only").
-

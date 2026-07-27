@@ -39,13 +39,7 @@ def calculate_flexible_score(query, metadata, embedding_score, primary="visual",
     # Formula: Final = Base + (Modifier * Influence)
     final_score = base_score + (modifier_score * influence)
     
-    # 4. Invert back to "Distance" logic for sorting (Lower is Better)?
-    # OR switch entire app to "Higher is Better" similarity logic.
-    # DECISION: Stick to "Distance" (Lower is Better) for compatibility with existing ChromaDB logic.
-    # Therefore:
-    # Final Distance = BaseDist - (ModifierStrength * Influence)
-    
-    return final_distance
+    return final_score
 ```
 
 ### Pitfalls & Risks
@@ -53,9 +47,8 @@ def calculate_flexible_score(query, metadata, embedding_score, primary="visual",
 2.  **Primary=Text:** If Primary is "Text", we technically can't use ChromaDB's vector search as the retrieval mechanism. We would need a full-text search engine (BM25). 
     *   *Constraint:* For this iteration, `primary="text"` might effectively mean "Filter by text first, then sort by visual," OR we just interpret "Primary" as "The heavily weighted factor" but still perform retrieval via Vector (since we don't have a text index).
     *   *Decision:* Since we lack a dedicated Inverted Index (BM25), the *Retrieval* step must remain Vector-based (to find candidates). The *Ranking* step can prioritize text.
-    *   *Risk:* If the vector search doesn't find the keyword-match image in the top 50, "Primary=Text" will fail to find it. This is a "Recall" limitation.
 
-3.  **Influence Range:** If `influence` is too high (> 0.5), a keyword match might make a completely unrelated image score better than a perfect visual match (as seen previously).
+3.  **Influence Range:** If `influence` is too high (> 0.5), a keyword match might make a completely unrelated image score better than a perfect visual match.
     *   *Validation:* Limit slider to `0.0` - `0.5`.
 
 ## Code Changes
@@ -63,31 +56,8 @@ def calculate_flexible_score(query, metadata, embedding_score, primary="visual",
 ### 1. `v2/find_similar.py`
 Update `search_similar` to accept the new params and implement the weighted logic.
 
-```python
-def search_similar(..., primary="visual", secondary="text", influence=0.15):
-    # ... retrieval ...
-    for res in candidate_results:
-        # Calculate scores
-        # ...
-        if secondary == 'text':
-             boost = match_ratio * influence
-             final_score = visual_distance - boost
-```
-
 ### 2. `v2/gui.py`
 Update `image_grid` route to parse form data.
 
-```python
-primary = request.form.get('primary')
-secondary = request.form.get('secondary')
-influence = float(request.form.get('influence'))
-```
-
 ### 3. `v2/templates/grid.html`
-Add HTML controls.
-
-```html
-<select name="primary">...</select>
-<select name="secondary">...</select>
-<input type="range" name="influence" min="0" max="0.5" step="0.05">
-```
+Add UI controls (selects and slider).

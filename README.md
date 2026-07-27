@@ -1,163 +1,198 @@
-# Image Converter and Semantic Search (v2)
+# Image Converter — Image processing, description, and semantic search
 
-This project provides a robust command-line interface (CLI) and a Flask-based web application for image processing, detailed description generation, and semantic search. It leverages modern AI models for embeddings (SigLIP, CLIP) and descriptions (Gemma 3 via Ollama, Florence-2), and uses ChromaDB for persistent vector storage and retrieval.
+A Python toolkit for converting images, generating rich natural-language descriptions, producing embeddings, and performing semantic/hybrid image search. The repository contains two versions (`v1` for historical reference and `v2` for the current implementation). `v2` is the actively developed code path and uses ChromaDB for persistent vector storage.
 
-The project has been refactored into a `v2` codebase, with the original `v1` components preserved for reference.
+This README covers: a feature guide, quick setup, usage examples (CLI and web), developer notes, and troubleshooting tips.
 
-## Features
+---
 
-### Core Functionality
--   **Image Conversion**: Convert images to different formats, resize, and adjust color modes.
--   **Image Description**: Generate detailed descriptions for images using either local Ollama models (e.g., Gemma 3) or Hugging Face models (e.g., Florence-2).
--   **Semantic Search**: Find similar images based on text queries or example images.
--   **Hybrid Search**: Combines visual embedding similarity with keyword-based re-ranking for more accurate results.
+## Quick highlights
 
-### Technical Highlights
--   **Modular `v2` Architecture**: Clean separation of concerns with a dedicated `v2` directory.
--   **ChromaDB Integration**: Efficient local vector database for storing image embeddings, descriptions, and metadata.
--   **Dynamic Model Selection**: Choose between SigLIP and CLIP for embeddings, and Ollama (Gemma 3) or Florence-2 for descriptions via CLI flags.
--   **Performance Metrics**: Detailed timing and counting for various stages of the image ingestion pipeline.
--   **Web UI**: A Flask application (`gui.py`) providing a user-friendly interface for searching and browsing images.
--   **Data Management Utilities**: CLI commands for inspecting stored image data and cleaning up invalid entries.
+- Image conversion and format conversion (resize, color conversion).
+- Image description using local Ollama models or Hugging Face models (Florence-2).
+- Embeddings produced with SigLIP or CLIP; embeddings are stored and queried with ChromaDB (v2) or FAISS+SQLite (v1).
+- Hybrid search combines visual similarity and text relevance (caption/description re-ranking).
+- CLI and Flask web UI for interactive use.
 
-## Setup
+---
 
-### 1. Clone the Repository
+## Feature guide (what the project provides)
+
+1. Image conversion
+   - Resize, convert format (JPEG/PNG), and change color mode (grayscale/RGB) via `convert_image.py` (present in both `v1` and `v2`).
+
+2. Image description / captioning
+   - Generate detailed descriptions using local Ollama models (default in `v2/describe_image.py`) or Hugging Face pipelines (when installed).
+   - The `caption_image` pipeline orchestrates description generation and embedding extraction for bulk ingestion.
+
+3. Embeddings and vector storage
+   - `v2` uses ChromaDB (persistent client) and exposes `PersistenceAPI` for upsert/query/cleanup.
+   - `v1` provides an alternate persistence implementation using SQLite + FAISS (images.db and faiss.index).
+   - Embeddings can come from `siglip` or `clip` (configurable).
+
+4. Hybrid semantic search
+   - Search by text query, example image, or both. Results combine nearest-neighbor embedding distance with text-based re-ranking.
+
+5. Interfaces
+   - `v2/image_cli.py`: Click-based CLI exposing ingestion, search, inspection, cleanup, stats, and web server startup.
+   - `v2/gui.py`: Flask app used by the `web` CLI command to display search results in a grid.
+
+6. Model & resource management
+   - `v2/model_manager.py` centralizes model loading and device detection (CUDA / MPS / CPU). Use environment variables such as `HF_TOKEN` for private HF models.
+
+7. Metrics & observability
+   - Lightweight timing via `v2/metrics.py` to track ingestion and embedding costs.
+
+8. Tests & examples
+   - Unit tests exist in `v1/tests` and `v2/tests` for core components (embeddings, search). Use `pytest` to run them.
+
+---
+
+## How-to guide (setup and common workflows)
+
+Prerequisites
+
+- Python 3.10+ recommended. Use matching `requirements*.txt` for environment-specific packages.
+- Optional: A machine with CUDA for GPU acceleration, or macOS with MPS support for Apple Silicon.
+- Optional: Ollama installed and running locally (if you want local LLM image descriptions). `v2/describe_image.py` calls `http://localhost:11434/api/generate` by default.
+- (Optional) A Hugging Face token (`HF_TOKEN`) if using private or rate-limited HF models.
+
+Basic setup
+
+1. Clone the repository and create a virtual environment:
+
 ```bash
-git clone https://github.com/aidevvaishampayan/image_converter.git
+git clone <repo-url>
 cd image_converter
-```
-
-### 2. Create and Activate a Python Virtual Environment
-It's highly recommended to use a virtual environment.
-```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
-_(Replace `python3` with `python3.10`, `python3.11`, or `python3.12` depending on your system and desired environment. Python 3.10 is often preferred for GPU setups.)_
 
-### 3. Install Dependencies
-Navigate into the `v2` directory and install the requirements.
+2. Install dependencies for the `v2` codebase (recommended):
+
 ```bash
 cd v2
 pip install --upgrade pip
 pip install -r requirements.txt
-# Or use specific requirements files based on your Python version and GPU availability:
-# pip install -r requirements310.txt  # For Python 3.10 with potential CUDA support
-# pip install -r requirements312.txt  # For Python 3.12 (CPU-only)
-# pip install -r requirements_mac.txt # For macOS (MPS)
 ```
-_Note: If you plan to use Ollama models, ensure [Ollama](https://ollama.ai/) is installed and running on your system._
 
-## Usage
+Notes on dependency files
 
-All primary functionalities are exposed via the `image_cli.py` script located in the `v2` directory.
+- `requirements.txt`, `requirements_mac.txt`, `requirements310.txt`, and `requirements312.txt` exist to support different targets. Prefer `v2/requirements.txt` for the primary v2 development path.
+
+Configure model credentials (optional)
 
 ```bash
-cd v2 # Ensure you are in the v2 directory
-python image_cli.py --help
+# Set Hugging Face token for private models
+export HF_TOKEN="<your-hf-token>"
+
+# Ensure Ollama (if used) is running locally on port 11434
+# ollama serve  # (or follow Ollama docs)
 ```
 
-### 1. Describe and Index Images
+Common workflows
 
-This command processes images, generates descriptions and embeddings, and stores them in ChromaDB.
+Index (describe) a folder of images (ingest + index):
 
 ```bash
-python image_cli.py describe --ip <path/to/images> --embed-model <siglip|clip> --cap-model <ollama|florence2>
-```
--   `--ip`: Path to an image file or a directory containing images.
--   `--embed-model`: Choose the embedding model (`siglip` or `clip`). Default is `siglip`.
--   `--cap-model`: Choose the description generation model (`ollama` or `florence2`). Default is `ollama`.
-
-**Example:**
-```bash
-python image_cli.py describe --ip ~/Pictures/MyVacation --embed-model siglip --cap-model ollama
+# from repo root
+python v2/image_cli.py describe --ip /path/to/images --embed-model siglip --cap-model ollama --chroma-path ./chroma_db
 ```
 
-### 2. Search for Similar Images
-
-Find images similar to a query text or another image.
+Search (text or image query):
 
 ```bash
-python image_cli.py search [--query "search terms"] [--image /path/to/query_image.jpg] --embed-model <siglip|clip>
-```
--   `--query`: Text query for semantic search.
--   `--image`: Path to an image whose embedding will be used for similarity search.
--   `--embed-model`: The embedding model used when indexing the images you want to search.
+# text query
+python v2/image_cli.py search --query "a dog running on the beach" --embed-model siglip
 
-**Example (text query):**
-```bash
-python image_cli.py search --query "a cat playing with a ball" --embed-model siglip
-```
-**Example (image query):**
-```bash
-python image_cli.py search --image ~/Pictures/MyCat.jpg --embed-model siglip
+# image query
+python v2/image_cli.py search --image /path/to/query.jpg --embed-model siglip
 ```
 
-### 3. Inspect Image Data
-
-View all stored metadata, descriptions, and embeddings for a specific image.
+Inspect a stored image's metadata and embeddings:
 
 ```bash
-python image_cli.py inspect --image-path /path/to/image.jpg --embed-model <siglip|clip>
+python v2/image_cli.py inspect --image-path /path/to/image.jpg --embed-model siglip
 ```
 
-### 4. Clean Up Empty Embeddings
-
-Remove any ChromaDB entries that were created from empty captions or descriptions. Useful for cleaning up a database after previous indexing issues.
+Run the web UI (Flask):
 
 ```bash
-python image_cli.py cleanup-embeddings --embed-model <siglip|clip>
+python v2/image_cli.py web --host 0.0.0.0 --port 5000
+# Then open http://localhost:5000
 ```
 
-### 5. Run the Web Application
-
-Start the Flask web server for a graphical interface.
+Cleanup empty text embeddings (captions/description chunks):
 
 ```bash
-python image_cli.py web [--host 0.0.0.0] [--port 5000] [--debug]
+python v2/image_cli.py cleanup-embeddings --embed-model siglip
 ```
 
-### 6. Purge Database
+Purge a collection (destructive):
 
-Delete an entire ChromaDB collection for a given embedding model.
 ```bash
-python image_cli.py purge --model <siglip|clip>
+python v2/image_cli.py purge --model siglip
 ```
 
-## Project Structure
+Developer & maintenance commands
 
--   `v2/`: Contains the current, actively developed codebase.
-    -   `image_cli.py`: Main CLI entry point for all operations.
-    -   `caption_image.py`: Handles image ingestion, description generation (Ollama/Florence-2), and embedding (SigLIP/CLIP).
-    -   `persistence.py`: Manages ChromaDB interactions, including insert, update, retrieve, and cleanup operations.
-    -   `model_manager.py`: Singleton for loading and managing AI models (embedding, description) efficiently.
-    -   `find_similar.py`: Implements the hybrid search logic.
-    -   `gui.py`: Flask application for the web interface.
-    -   `metrics.py`: Singleton for tracking performance metrics during ingestion.
-    -   `templates/` & `static/`: Web UI templates and static assets.
-    -   `requirements*.txt`: Python dependency lists.
--   `v1/`: Contains the previous version of the project files, preserved for historical context and reference.
-    -   `README.md`: Original project overview.
-    -   `caption_image.py`: Original script for image captioning.
-    -   `convert_image.py`: Original image conversion utility.
-    -   `describe_image.py`: Original script for image description.
-    -   `dump_db.py`: Utility to dump database contents.
-    -   `find_similar.py`: Original script for finding similar images using FAISS.
-    -   `gui.py`: Original Flask web application.
-    -   `image_cli.py`: Original CLI for managing v1 tasks.
-    -   `model_manager.py`: Original model loading and management.
-    -   `persistence.py`: Original data persistence layer using SQLite and FAISS.
-    -   `requirements*.txt`: Original Python dependency lists.
-    -   `static/` & `templates/`: Original web assets.
-    -   `core/`: Contains original embedding and FAISS search modules.
-    -   `tests/`: Contains original test files.
--   `TODO/`: Markdown files outlining future development tasks.
--   `understanding.md`: Detailed internal document explaining v1 architecture and initial v2 goals.
+- Run unit tests:
 
-## Development Roadmap (TODO)
+```bash
+pytest -q
+```
 
--   **Refactor Caption Pipeline**: Further modularize `caption_image.py`.
--   **Dynamic Hybrid Search**: Add UI controls to configure search parameters (primary/secondary factors, influence).
--   **Synonym Expansion**: Implement query expansion using Ollama to improve text search recall.
--   **Asynchronous Image Pipelining**: Optimize ingestion by parallelizing Ollama descriptions with embedding/storage.
+- Format and lint (recommended):
+
+```bash
+pip install black ruff mypy
+black .
+ruff check .
+mypy v2 --ignore-missing-imports
+```
+
+---
+
+## Developer notes (where to look)
+
+- `v2/image_cli.py` — CLI front-end (Click) for v2 workflows.
+- `v2/caption_image.py` — Orchestrates description generation and embedding for ingestion.
+- `v2/persistence.py` — ChromaDB-backed PersistenceAPI (insert/update/query/upsert/cleanup).
+- `v2/model_manager.py` — Loads and caches models (embedding and captioning).
+- `v2/find_similar.py` — Hybrid search logic combining embeddings and text signals.
+- `v2/gui.py` — Flask templates and handlers used by the web UI.
+- `v1/` — Historical v1 implementation using SQLite + FAISS; useful reference for alternative persistence patterns.
+
+Design considerations
+
+- `v2` favors ChromaDB for persistent vector store and richer metadata handling.
+- Model loading is centralized to avoid repeated heavyweight downloads and to manage device placement (CUDA/MPS/CPU).
+- Persistence stores image entries plus caption and description chunk embeddings to support hybrid search and fine-grained re-ranking.
+
+---
+
+## Troubleshooting & tips
+
+- If descriptions are missing or fail, ensure Ollama is reachable at `http://localhost:11434` or switch to `--cap-model florence2` (requires HF models installed and `HF_TOKEN` if private).
+- Monitor memory when indexing large image sets; consider batching and smaller batch sizes for devices with limited RAM.
+- If ChromaDB queries return nothing, confirm that the collection path (default `./chroma_db`) contains data and that you used the same `--embed-model` when indexing and searching.
+
+---
+
+## Contributing
+
+Contributions are welcome. Suggested steps:
+
+1. Fork the repository and create a feature branch.
+2. Run formatting/linting and tests locally.
+3. Open a PR with a clear description and tests for any behavioral changes.
+
+---
+
+If you'd like, I can also:
+
+- Add a `pyproject.toml` and a `requirements-dev.txt` for development tools.
+- Add a minimal GitHub Actions workflow to run linters and tests on PRs.
+- Run an automatic code-format pass (`black`) and replace ad-hoc `print()` logging with structured `logging` in key modules.
+
+---

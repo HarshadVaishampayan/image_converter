@@ -65,4 +65,3 @@ class Metrics:
 4.  Add `metrics.start("Image Embedding")` around the SigLIP encode block.
 5.  Add `metrics.start("DB Upsert")` in the persistence consumer.
 6.  Print the summary at the end of the `process_folder_parallel_caption` generator.
-
