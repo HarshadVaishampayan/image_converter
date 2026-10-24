@@ -112,7 +112,7 @@ function sideHtml(f, label, key) {
     <div class="meta">${fmtSize(f.size)} · modified ${fmtDate(f.mtime)}</div>
     <div class="actions">
       <button data-act="reveal" data-path="${esc(f.path)}">Show in Finder</button>
-      <button class="danger" data-act="delete" data-path="${esc(f.path)}">Move to Trash</button>
+      ${imageActions(f.path, { forget: f.indexed })}
     </div></div>`;
 }
 
@@ -151,14 +151,23 @@ function render() {
 const busy = () => $('#progress').classList.contains('on');
 
 $('#list').onclick = async (e) => {
-  const b = e.target.closest('button[data-act]'); if (!b) return;
+  const b = e.target.closest('button[data-act],button[data-img-act]'); if (!b) return;
   const path = b.dataset.path;
   if (b.dataset.act === 'reveal') return api(DUP_API + '/reveal', { path }).catch((x) => showErr(x.message));
-  if (!confirm(`Move this file to the Trash?\n\n${path}\n\n(You can restore it from the Trash with “Put Back”.)`)) return;
+  const forget = b.dataset.imgAct === 'forget';
   b.disabled = true;
   try {
-    await api(DUP_API + '/delete', { path });
-    pairs = pairs.filter((p) => p.a.path !== path && p.b.path !== path);
+    const done = forget ? await forgetImage(path, DUP_API + '/forget') : await deleteImage(path, DUP_API + '/delete');
+    if (!done) { b.disabled = false; return; }
+    const name = path.split('/').pop();
+    if (forget) {
+      // file stays in the results; it just isn't searchable any more
+      pairs.forEach((p) => { [p.a, p.b].forEach((f) => { if (f.path === path) f.indexed = false; }); });
+      toast(`Forgot ${name} from the index.`);
+    } else {
+      pairs = pairs.filter((p) => p.a.path !== path && p.b.path !== path);
+      toast(done === 'permanent' ? `Permanently deleted ${name}.` : `Moved ${name} to the Trash.`);
+    }
     render();
   } catch (x) { showErr(x.message); b.disabled = false; }
 };

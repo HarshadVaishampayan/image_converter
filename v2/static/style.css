@@ -147,3 +147,22 @@ button:disabled { opacity: .5; cursor: default; }
 .log-dialog { width: min(1100px, 100%); }
 .log-text { margin: 0; max-height: 70vh; overflow: auto; background: var(--bg); border: 1px solid var(--line);
   border-radius: 7px; padding: 10px; font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-all; }
+
+/* ---- image action icons (Forget from index / Delete from source) ---- */
+.icon-btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px; border-radius: 8px; line-height: 0; }
+.icon-btn span { line-height: 1.2; }
+.icon-btn.danger:hover:not(:disabled) { background: var(--bad-bg); filter: none; }
+.img-wrap { position: relative; }
+.img-actions { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; opacity: 0; transition: opacity .15s; }
+.img-actions .icon-btn { background: color-mix(in srgb, var(--panel) 88%, transparent); backdrop-filter: blur(4px);
+  border-color: transparent; box-shadow: 0 1px 4px rgba(0, 0, 0, .25); }
+.img-wrap:hover .img-actions, .img-wrap:focus-within .img-actions { opacity: 1; }
+@media (hover: none) { .img-actions { opacity: 1; } }
+.modal-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.modal-actions .icon-btn { padding: 7px 11px; line-height: 1; }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 20px); opacity: 0; pointer-events: none;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 10px 16px; z-index: 200;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, .25); transition: opacity .2s, transform .2s; max-width: min(640px, calc(100% - 32px)); }
+.toast.on { opacity: 1; transform: translate(-50%, 0); }
+.toast.good { border-left: 4px solid var(--good); }
+.toast.bad { border-left: 4px solid var(--bad); }

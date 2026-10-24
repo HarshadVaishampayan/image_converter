@@ -11,7 +11,10 @@ import os
 import subprocess
 import threading
 
-from flask import Blueprint, abort, jsonify, render_template, request, send_file
+from flask import Blueprint, abort, current_app, jsonify, render_template, request, send_file
+
+import image_ops
+from find_similar import invalidate_cache
 
 from jobs import JobRunner
 
@@ -188,42 +191,68 @@ def job_cancel(job_id):
     return jsonify(job.to_json())
 
 
+def _index():
+    return current_app.extensions.get("image_index")
+
+
 @bp.get("/api/pairs")
 def get_pairs():
     with state_lock:
         pairs = list(state["pairs"].values())
+    api = _index()
+    indexed = image_ops.indexed_paths(api) if api is not None and pairs else set()
+    for p in pairs:  # whether "Forget from index" applies to each side
+        p["a"]["indexed"] = p["a"]["path"] in indexed
+        p["b"]["indexed"] = p["b"]["path"] in indexed
     return jsonify({"root": state["root"], "pairs": pairs})
 
 
-def _move_to_trash(path):
-    """Move to the macOS Trash via NSFileManager (supports Finder 'Put Back')."""
-    js = ("function run(argv){ObjC.import('Foundation');"
-          "var err=$();"
-          "var ok=$.NSFileManager.defaultManager.trashItemAtURLResultingItemURLError("
-          "$.NSURL.fileURLWithPath(argv[0]), null, err);"
-          "if(!ok){throw new Error(ObjC.unwrap(err.localizedDescription))}"
-          "return 'ok'}")
-    out = subprocess.run(["osascript", "-l", "JavaScript", "-e", js, path],
-                         capture_output=True, text=True, timeout=30)
-    if out.returncode != 0 or os.path.exists(path):
-        raise OSError(out.stderr.strip() or "Could not move file to Trash")
-
-
-@bp.post("/api/delete")
-def delete_file():
-    path = request.get_json(force=True).get("path", "")
-    if not (_within_root(path) and _known_path(path) and os.path.isfile(path)):
+def _result_file(body):
+    path = (body or {}).get("path", "")
+    if not (_within_root(path) and _known_path(path) and image_ops.safe_file(path)):
         abort(400, "Path is not a file from the current scan results.")
-    try:
-        _move_to_trash(path)
-    except OSError as e:
-        abort(500, str(e))
+    return path
+
+
+def _drop_from_results(path):
     with state_lock:
         state["pairs"] = {k: p for k, p in state["pairs"].items()
                           if path not in (p["a"]["path"], p["b"]["path"])}
         if state["files"] is not None:
             state["files"] = [f for f in state["files"] if f["path"] != path]
-    return jsonify({"ok": True, "trashed": path})
+
+
+@bp.post("/api/delete")
+def delete_file():
+    """Trash a file from the results (409 + needs_permanent if there's no Trash),
+    and forget it from the search index if it was indexed."""
+    body = request.get_json(force=True)
+    path = _result_file(body)
+    try:
+        how = image_ops.delete_file(path, permanent=bool(body.get("permanent")))
+    except image_ops.TrashUnavailable as e:
+        return jsonify({"error": f"This file can't be moved to the Trash ({e}).",
+                        "needs_permanent": True, "path": path}), 409
+    except OSError as e:
+        abort(500, f"Couldn't delete the file: {e}")
+    _drop_from_results(path)
+    api = _index()
+    if api is not None and image_ops.forget(api, path):
+        invalidate_cache()
+    return jsonify({"ok": True, "path": path, "deleted": how})
+
+
+@bp.post("/api/forget")
+def forget_file():
+    """Remove a file from the search index; the file and the duplicate results stay."""
+    path = (request.get_json(force=True) or {}).get("path", "")
+    if not (_within_root(path) and _known_path(path)):
+        abort(400, "Path is not a file from the current scan results.")
+    api = _index()
+    if api is None or not image_ops.forget(api, path):
+        abort(400, "That file isn't in the search index.")
+    invalidate_cache()
+    return jsonify({"ok": True, "path": path})
 
 
 @bp.post("/api/reveal")

@@ -18,6 +18,7 @@ app_logging.setup()
 log = logging.getLogger("image_converter.app")
 
 import index_jobs
+import image_ops
 
 from find_similar import search_similar, invalidate_cache
 import tagging
@@ -46,6 +47,7 @@ def _only_local_hosts():
 # Initialize PersistenceAPI globally (once)
 # This prevents "Too many open files" errors by reusing the ChromaDB client
 api_siglip = PersistenceAPI(embedding_model_type='siglip')
+app.extensions["image_index"] = api_siglip  # shared with the duplicates blueprint
 # api_clip = PersistenceAPI(embedding_model_type='clip') # Only if we need to support clip in GUI
 
 def get_images_from_db(query: str = None, image_id: str = None, top_k: int = 6, sensitivity: float = 0.5):
@@ -245,6 +247,46 @@ def pick_folder():
         return jsonify({"path": None})  # user cancelled
     path = out.stdout.strip()
     return jsonify({"path": path.rstrip("/") if len(path) > 1 else path})
+
+
+# ------------------------------------------------- forget / delete image ----
+def _indexed_file(body):
+    """The requested path, if it's an indexed file that still exists."""
+    path = (body or {}).get("path", "")
+    if not path or not image_ops.is_indexed(api_siglip, path):
+        abort(404, "That image isn't in the index.")
+    return path
+
+
+@app.post('/api/images/forget')
+def image_forget():
+    path = _indexed_file(request.get_json(force=True))
+    removed = image_ops.forget(api_siglip, path)
+    invalidate_cache()
+    return jsonify({"ok": True, "path": path, "entries_removed": removed})
+
+
+@app.post('/api/images/delete')
+def image_delete():
+    """Delete an indexed image from disk (Trash first) and forget it.
+
+    409 + needs_permanent when the Trash isn't available; resend with
+    permanent=true after the user confirms.
+    """
+    body = request.get_json(force=True)
+    path = _indexed_file(body)
+    if not image_ops.safe_file(path):
+        abort(404, "The file doesn't exist on disk (or its folder isn't accessible right now).")
+    try:
+        how = image_ops.delete_file(path, permanent=bool(body.get("permanent")))
+    except image_ops.TrashUnavailable as e:
+        return jsonify({"error": f"This file can't be moved to the Trash ({e}).",
+                        "needs_permanent": True, "path": path}), 409
+    except OSError as e:
+        abort(400, f"Couldn't delete the file: {e}")
+    image_ops.forget(api_siglip, path)
+    invalidate_cache()
+    return jsonify({"ok": True, "path": path, "deleted": how})
 
 
 # ------------------------------------------------------------- indexing ----

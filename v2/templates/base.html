@@ -23,8 +23,47 @@
         body: JSON.stringify(body) };
       const r = await fetch(url, opts);
       const data = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(data.error || r.statusText);
+      if (!r.ok) throw Object.assign(new Error(data.error || r.statusText), { status: r.status, data });
       return data;
+    };
+
+    // ---- image actions: Forget from index / Delete from source (Search + Duplicates) ----
+    window.ICONS = {
+      // magnifier with a slash: "no longer findable"
+      forget: '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.9-4.9"/><path d="M7.5 7.5l6 6"/></svg>',
+      trash: '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/><path d="M9 7V4h6v3"/></svg>',
+    };
+    const _attr = (s) => String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    window.imageActions = (path, { forget = true, labels = false } = {}) =>
+      (forget ? `<button type="button" class="icon-btn" data-img-act="forget" data-path="${_attr(path)}" title="Forget from index" aria-label="Forget from index">${ICONS.forget}${labels ? '<span>Forget from index</span>' : ''}</button>` : '') +
+      `<button type="button" class="icon-btn danger" data-img-act="delete" data-path="${_attr(path)}" title="Delete from source" aria-label="Delete from source">${ICONS.trash}${labels ? '<span>Delete from source</span>' : ''}</button>`;
+
+    /** Ask, then forget. Resolves true if forgotten, false if the user said no. */
+    window.forgetImage = async (path, url) => {
+      if (!confirm(`Forget this image from the search index?\n\n${path}\n\nThe file itself is not touched. It will come back if you index its folder again.`)) return false;
+      await api(url, { path });
+      return true;
+    };
+
+    /** Ask, then delete (Trash first; a second, explicit warning before any permanent delete).
+        Resolves "trash" | "permanent", or false if the user said no. */
+    window.deleteImage = async (path, url) => {
+      if (!confirm(`Delete this file?\n\n${path}\n\nIt will be moved to the Trash and removed from the index.`)) return false;
+      try {
+        return (await api(url, { path })).deleted;
+      } catch (x) {
+        if (!x.data?.needs_permanent) throw x;
+        if (!confirm(`⚠️ ${x.message}\n\nThis usually means it's on a network share, where macOS has no Trash.\n\nDelete it PERMANENTLY?\n\n${path}\n\nThis cannot be undone.`)) return false;
+        return (await api(url, { path, permanent: true })).deleted;
+      }
+    };
+
+    /** Small auto-hiding status message. */
+    window.toast = (msg, kind = 'good') => {
+      let t = document.getElementById('toast');
+      if (!t) { t = document.createElement('div'); t.id = 'toast'; t.setAttribute('role', 'status'); document.body.appendChild(t); }
+      t.textContent = msg; t.className = `toast on ${kind}`;
+      clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), 4000);
     };
   </script>
   {% block scripts %}{% endblock %}
