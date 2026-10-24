@@ -24,6 +24,14 @@
   <div class="banner" id="idxDone"></div>
   <div class="banner err" id="err"></div>
 
+  <section class="panel" id="runsPanel" hidden>
+    <div class="toolbar">
+      <h2 style="margin:0">Recent indexing runs</h2>
+      <button type="button" id="viewLog">View log</button>
+    </div>
+    <div id="runs"></div>
+  </section>
+
   <section class="panel">
     <div class="toolbar">
       <h2 style="margin:0">
@@ -98,6 +106,18 @@
     </div>
     <p class="hint">JPG and PNG files. Hidden files and folders are skipped. The first run downloads the models.</p>
   </form>
+</div>
+<div class="modal" id="logDialog" role="dialog" aria-modal="true" aria-labelledby="logTitle">
+  <div class="panel dialog log-dialog">
+    <div class="toolbar" style="margin:0">
+      <h2 id="logTitle" style="margin:0">Log</h2>
+      <span class="hint path" id="logFile"></span>
+      <span style="flex:1"></span>
+      <button type="button" id="logRefresh">Refresh</button>
+      <button type="button" id="logClose">Close</button>
+    </div>
+    <pre id="logText" class="log-text"></pre>
+  </div>
 </div>
 {% endblock %}
 
@@ -195,6 +215,7 @@ function track(id) {
   $('#idxProgress').classList.add('on');
   $('#idxDone').classList.remove('on');
   $('#addIndex').disabled = true;
+  loadRuns();
   poll();
 }
 async function poll() {
@@ -205,6 +226,7 @@ async function poll() {
   if (j.status === 'running') return setTimeout(poll, 1000);
   $('#idxProgress').classList.remove('on');
   $('#addIndex').disabled = false;
+  loadRuns();
   if (j.status === 'error') return showErr(j.error);
   const b = $('#idxDone');
   b.innerHTML = `${j.message}${j.error ? ' ' + j.error : ''} <a href="{{ url_for('search_form') }}">Refresh results</a>`;
@@ -212,6 +234,71 @@ async function poll() {
   b.classList.add('on');
 }
 $('#idxCancel').onclick = () => idxJob && api(`/api/index/job/${idxJob}/cancel`, {});
+
+// ------------------------------------------------- Recent runs + resume ----
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const STATUS = { running: ['Running', ''], done: ['Done', 'good'], cancelled: ['Cancelled', 'warn'],
+                 failed: ['Failed', 'bad'], interrupted: ['Interrupted', 'bad'] };
+const ago = (t) => { const s = Date.now() / 1000 - t;
+  return s < 90 ? 'just now' : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129600 ? `${Math.round(s / 3600)} h ago` : new Date(t * 1000).toLocaleString(); };
+
+async function loadRuns() {
+  const r = await api('/api/index/runs').catch(() => null);
+  if (!r) return;
+  $('#runsPanel').hidden = !r.runs.length;
+  const busy = r.runs.some((x) => x.status === 'running');
+  $('#runs').innerHTML = r.runs.map((x) => {
+    const [label, cls] = STATUS[x.status] || [x.status, ''];
+    const remaining = x.total - x.indexed;
+    const issues = x.failed_count + x.skipped_count;
+    const open = x.status !== 'running' && !x.followed_by;  // a later run already picked this one up
+    const canResume = open && x.status !== 'done' && remaining > 0;
+    const counts = [`<b>${x.indexed.toLocaleString()}</b> of ${x.total.toLocaleString()} indexed`,
+      x.failed_count ? `<span class="bad-text">${x.failed_count} failed</span>` : '',
+      x.skipped_count ? `${x.skipped_count} skipped` : '',
+      x.not_attempted && x.status !== 'running' ? `${x.not_attempted.toLocaleString()} not reached` : ''].filter(Boolean).join(' · ');
+    const issueRows = [...x.failed.map((i) => ['failed', i]), ...x.skipped.map((i) => ['skipped', i])]
+      .map(([k, i]) => `<li><span class="badge ${k === 'failed' ? 'bad' : 'warn'}">${k}</span> <span class="path">${esc(i.path)}</span><div class="hint">${esc(i.reason)}</div></li>`).join('');
+    return `<div class="run">
+      <div class="run-head">
+        <span class="badge ${cls}">${label}</span>
+        <span class="path run-folder" title="${esc(x.folder)}">${esc(x.folder)}</span>
+        <span class="hint">${x.recursive ? 'with subfolders' : 'this folder only'} · ${x.caption_model === 'ollama' ? 'Ollama' : 'Florence-2'}${x.origin !== 'new' ? ' · ' + x.origin : ''} · ${ago(x.created)}</span>
+      </div>
+      <div class="run-body">
+        <span>${counts}</span>
+        <span class="run-actions">
+          ${canResume ? `<button type="button" class="primary" data-resume="${x.id}" ${busy ? 'disabled' : ''}>Resume</button>` : ''}
+          ${issues && open ? `<button type="button" data-retry="${x.id}" ${busy ? 'disabled' : ''}>Retry ${issues} failed/skipped</button>` : ''}
+          ${x.followed_by ? `<span class="hint">${x.followed_by === 'retry' ? 'Retried' : 'Resumed'} in a later run</span>` : ''}
+        </span>
+      </div>
+      ${x.error ? `<div class="hint bad-text">${esc(x.error)}</div>` : ''}
+      ${issues ? `<details><summary>Show failed &amp; skipped files</summary><ul class="issues">${issueRows}</ul>${issues > x.failed.length + x.skipped.length ? '<p class="hint">Showing the first 200 of each. The full list is in the log.</p>' : ''}</details>` : ''}
+    </div>`;
+  }).join('');
+}
+
+$('#runs').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-resume],[data-retry]');
+  if (!b) return;
+  const url = b.dataset.resume ? `/api/index/runs/${b.dataset.resume}/resume` : `/api/index/runs/${b.dataset.retry}/retry`;
+  b.disabled = true;
+  try { const job = await api(url, {}); showErr(''); track(job.id); }
+  catch (x) { showErr(x.message); b.disabled = false; }
+});
+
+async function showLog() {
+  const r = await api('/api/log?lines=400').catch((x) => ({ text: x.message, log_file: '' }));
+  $('#logFile').textContent = r.log_file;
+  $('#logText').textContent = r.text || '(the log is empty)';
+  $('#logText').scrollTop = $('#logText').scrollHeight;
+}
+$('#viewLog').onclick = () => { $('#logDialog').classList.add('on'); showLog(); };
+$('#logRefresh').onclick = showLog;
+$('#logClose').onclick = () => $('#logDialog').classList.remove('on');
+$('#logDialog').onclick = (e) => { if (e.target === $('#logDialog')) $('#logDialog').classList.remove('on'); };
+loadRuns();
 
 // Resume the progress bar if an indexing run is already going (e.g. after a reload)
 api('/api/index/options').then((o) => { if (o.busy && o.current) track(o.current.id); }).catch(() => {});

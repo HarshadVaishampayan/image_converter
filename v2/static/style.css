@@ -132,3 +132,18 @@ button:disabled { opacity: .5; cursor: default; }
 .banner.good { background: var(--good-bg); color: var(--good); }
 .card .tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .card .tags .badge { font-size: 11px; padding: 1px 7px; }
+
+/* ---- recent indexing runs + log ---- */
+.run { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; margin-bottom: 8px; }
+.run-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; min-width: 0; }
+.run-folder { font-size: 12.5px; word-break: break-all; }
+.run-body { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; justify-content: space-between; }
+.run-actions { display: flex; gap: 8px; }
+.run-actions button { padding: 5px 10px; font-size: 13px; }
+.run details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.issues { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 6px; max-height: 320px; overflow: auto; }
+.issues .path { font-size: 12px; word-break: break-all; }
+.bad-text { color: var(--bad); }
+.log-dialog { width: min(1100px, 100%); }
+.log-text { margin: 0; max-height: 70vh; overflow: auto; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 7px; padding: 10px; font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-all; }

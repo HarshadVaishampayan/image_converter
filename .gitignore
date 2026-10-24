@@ -217,3 +217,5 @@ faiss.index.map
 .DS_Store
 chroma_db/
 **/.DS_Store
+# App logs and indexing-run records
+v2/logs/

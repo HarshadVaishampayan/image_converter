@@ -15,6 +15,7 @@ from persistence import PersistenceAPI
 from caption_image import process_folder_parallel_caption, make_persistence_consumer, print_consumer
 from find_similar import search_similar # Import search_similar
 from tabulate import tabulate
+import app_logging
 
 @click.group()
 def cli():
@@ -87,21 +88,40 @@ def stats(model):
 @click.option('--cap-model', default='ollama', type=click.Choice(['florence2', 'ollama']), help='Captioning/Description model to use.')
 @click.option('--chroma-path', default=None, help='Path to the ChromaDB data directory (default: v2/chroma_db).')
 @click.option('--shallow', is_flag=True, help='Only index images directly in the folder, not in subfolders.')
-def describe(ip, embed_model, cap_model, chroma_path, shallow):
+@click.option('--skip-existing/--reindex-all', default=True,
+              help='Skip images already in the index (default), so re-running resumes an interrupted run.')
+def describe(ip, embed_model, cap_model, chroma_path, shallow, skip_existing):
     """Describe images and index them using the selected models."""
+    from caption_image import _get_image_paths
     click.echo(f"-START INDEXING (Embed: {embed_model.upper()} | Cap: {cap_model.upper()})-")
-    
+
+    paths = _get_image_paths(ip, recursive=not shallow)
+    if skip_existing:
+        api = PersistenceAPI(path=chroma_path, embedding_model_type=embed_model)
+        done = {m.get("file_path") for m in api.collection.get(where={"type": "image"}, include=["metadatas"])["metadatas"]}
+        before = len(paths)
+        paths = [p for p in paths if p not in done]
+        click.echo(f"{before - len(paths)} of {before} image(s) already indexed; {len(paths)} to go.")
+    if not paths:
+        click.echo("Nothing to index.")
+        return
+
+    issues = []
     persist_consumer = make_persistence_consumer(path=chroma_path, embedding_model_type=embed_model)
-    
-    for _ in process_folder_parallel_caption(
+    indexed = sum(1 for _ in process_folder_parallel_caption(
         path=ip,
         consumers=[print_consumer, persist_consumer],
         embedding_model_type=embed_model,
         caption_model_type=cap_model,
-        recursive=not shallow,
-    ):
-        pass
-    click.echo("=END=")
+        image_paths=paths,
+        on_issue=lambda kind, p, reason: issues.append((kind, p, reason)),
+    ))
+    click.echo(f"=END= indexed {indexed}, failed {sum(k == 'failed' for k, _, _ in issues)}, "
+               f"skipped {sum(k == 'skipped' for k, _, _ in issues)}")
+    for kind, p, reason in issues:
+        click.echo(f"  {kind.upper():7} {p}: {reason}", err=True)
+    if issues:
+        click.echo(f"Details are in the log: {app_logging.LOG_FILE}", err=True)
 
 @cli.command()
 @click.option('--image', type=str, help='Path to the image to search with.')
@@ -203,4 +223,5 @@ def web(host, port, debug):
     subprocess.run(cmd)
 
 if __name__ == '__main__':
+    app_logging.setup()
     cli()

@@ -17,7 +17,10 @@ import traceback
 import argparse
 import re
 from metrics import Metrics
+import logging
 import tagging
+
+log = logging.getLogger("image_converter.index")
 
 # ------------------------------
 # Helper Functions and Classes
@@ -91,19 +94,23 @@ class ImageDataset(Dataset):
         image_path = self.image_paths[idx]
         try:
             image = Image.open(image_path).convert("RGB")
-            return image, image_path
+            return image, image_path, None
         except Exception as e:
-            # Return None for path to indicate failure
-            return None, image_path
+            # Keep the reason so the caller can report which file failed and why
+            return None, image_path, f"{type(e).__name__}: {e}"
 
 
 def collate_fn(batch):
-    """Custom collate function to filter out items where the image failed to load."""
-    batch = [item for item in batch if item[0] is not None]
-    if not batch:
-        return None, None
-    images, paths = zip(*batch)
-    return list(images), list(paths)
+    """Split a batch into loaded images and (path, reason) load failures."""
+    loaded = [item for item in batch if item[0] is not None]
+    failures = [(path, reason) for image, path, reason in batch if image is None]
+    images = [item[0] for item in loaded]
+    paths = [item[1] for item in loaded]
+    return images, paths, failures
+
+
+class FolderUnavailable(OSError):
+    """The folder being indexed disappeared mid-run (e.g. a network share dropped)."""
 
 
 # ------------------------------
@@ -118,6 +125,7 @@ def process_folder_parallel_caption(
     caption_model_type: str = "ollama",
     recursive: bool = True,
     image_paths: List[str] = None,
+    on_issue: Callable[[str, str, str], None] = None,
 ) -> Generator:
     """
     Process images in a directory (recursively by default) using:
@@ -125,21 +133,31 @@ def process_folder_parallel_caption(
     2. Selected embedding model (CLIP/SigLIP) for vectors.
 
     Pass `image_paths` to process an explicit list instead of scanning `path`.
+    Yields one result per image that was described and saved by every consumer.
+    `on_issue(kind, path, reason)` is called for each image that "failed"
+    (unreadable, model error, save error) or was "skipped" (empty description).
+    A batch that errors is retried one image at a time, so one bad file only
+    costs itself.
     """
     metrics = Metrics()
     metrics.reset()
-    
+
     total_start_time = time.time()
-    print(f"\nProcessing path: {path} | Embed: {embedding_model_type.upper()} | Cap: {caption_model_type.upper()}")
+    log.info("Indexing %s | embed=%s | captions=%s", path, embedding_model_type, caption_model_type)
+
+    def report(kind, image_path, reason):
+        (log.error if kind == "failed" else log.warning)("%s %s: %s", kind.upper(), image_path, reason)
+        if on_issue:
+            on_issue(kind, image_path, reason)
 
     # Get cached models and parameters
     model_manager = ModelManager()
-    
+
     # Lazy-load Florence-2 only if requested
     caption_processor, caption_model, beam_size, batch_size = (None, None, 1, 2)
     if caption_model_type == "florence2":
         caption_processor, caption_model, beam_size, batch_size = model_manager.get_caption_model()
-    
+
     # Selected embedding model
     embedding_model = model_manager.get_embedding_model(embedding_model_type)
     device = model_manager.device
@@ -147,11 +165,11 @@ def process_folder_parallel_caption(
     # Get all image paths recursively
     paths_to_process = image_paths if image_paths is not None else _get_image_paths(path, recursive)
     if not paths_to_process:
-        print(f"Error: No valid images found in {path}")
+        log.warning("No valid images found in %s", path)
         return
 
     # Setup DataLoader
-    num_workers = 0 
+    num_workers = 0
     dataset = ImageDataset(paths_to_process)
     data_loader = DataLoader(
         dataset,
@@ -159,166 +177,160 @@ def process_folder_parallel_caption(
         shuffle=False,
         num_workers=num_workers,
         collate_fn=collate_fn,
-        pin_memory=False, 
+        pin_memory=False,
     )
 
-    print(f"Found {len(paths_to_process)} images. Starting processing with batch size {batch_size}.")
-    
-    processed_count = 0
     total_images = len(paths_to_process)
-    
+    log.info("Found %d images; batch size %d", total_images, batch_size)
+
+    processed_count = 0
+    attempted = 0
+
     # Task Prompts
     florence_prompt = "<MORE_DETAILED_CAPTION>"
+    factual_prompt = (
+        "Describe this image in detail. Be factual. No poetic flair. "
+        "Do not start with 'The image shows' or 'Here is a description'. "
+        "Provide ONLY the description itself. No markdown."
+    )
+
+    def describe_batch(batch_images, batch_paths):
+        """Embeddings + tags + descriptions for one batch. Raises on model errors."""
+        # --- 1. Embedding Inference (Universal) ---
+        with torch.no_grad():
+            metrics.start("Image Embedding")
+            embeddings = embedding_model.encode(batch_images, convert_to_tensor=True, device=device)
+            metrics.stop("Image Embedding")
+        embeddings_np = embeddings.float().cpu().numpy()
+        del embeddings
+
+        # --- 1b. Zero-shot tags (SigLIP only): specific labels + their categories ---
+        batch_tags = tagging.tag_embeddings(embedding_model, embeddings_np)
+
+        # --- 2. Image Description (Model Specific) ---
+        descriptions = ["" for _ in batch_paths]
+        why_empty = ["captioner returned an empty description" for _ in batch_paths]
+
+        if caption_model_type == "florence2":
+            metrics.start("Florence-2 Inference")
+            florence_inputs = caption_processor(text=[florence_prompt] * len(batch_images),
+                                                images=batch_images, return_tensors="pt")
+            # Ensure inputs match model's precision
+            model_dtype = next(caption_model.parameters()).dtype
+            florence_inputs = {k: v.to(device, model_dtype) if torch.is_floating_point(v) else v.to(device)
+                               for k, v in florence_inputs.items()}
+            with torch.no_grad():
+                generated_ids = caption_model.generate(
+                    **florence_inputs,
+                    max_new_tokens=256,
+                    num_beams=beam_size,
+                    do_sample=False,
+                    use_cache=False,
+                )
+            generated_texts = caption_processor.batch_decode(generated_ids, skip_special_tokens=False)
+            for i, text in enumerate(generated_texts):
+                image_size = (batch_images[i].width, batch_images[i].height)
+                try:
+                    parsed = caption_processor.post_process_generation(text, task=florence_prompt, image_size=image_size)
+                    desc_text = parsed[florence_prompt]
+                except Exception:
+                    desc_text = caption_processor.batch_decode([generated_ids[i]], skip_special_tokens=True)[0]
+                descriptions[i] = cleanup_text(desc_text)
+            del florence_inputs, generated_ids
+            metrics.stop("Florence-2 Inference")
+
+        elif caption_model_type == "ollama":
+            metrics.start("Ollama Description")
+            from concurrent.futures import ThreadPoolExecutor
+
+            def fetch_ollama_description(idx, img_path):
+                try:
+                    desc_text = describe_image(img_path, model="gemma3:12b-it-qat",
+                                               provider="ollama", prompt=factual_prompt)
+                    return idx, cleanup_text(desc_text), None
+                except Exception as e:
+                    return idx, "", f"Ollama error: {type(e).__name__}: {e}"
+
+            with ThreadPoolExecutor(max_workers=len(batch_paths)) as executor:
+                for idx, desc, err in executor.map(lambda p: fetch_ollama_description(*p), enumerate(batch_paths)):
+                    descriptions[idx] = desc
+                    if err:
+                        why_empty[idx] = err
+            metrics.stop("Ollama Description")
+
+        results = []
+        for idx, image_path in enumerate(batch_paths):
+            image = batch_images[idx]
+            results.append({
+                "image_path": image_path,
+                "captions": [],  # Explicitly empty as per design decision to unify on description
+                "description": descriptions[idx],
+                "embedding": embeddings_np[idx],
+                "width": image.width,
+                "height": image.height,
+                "metadata": {
+                    "env": detect_environment(),
+                    "device": str(device),
+                    "batch_size": batch_size,
+                    "embedding_model": embedding_model_type,
+                    "description_model": caption_model_type,
+                    "tags": json.dumps(batch_tags[idx]),
+                },
+                "_why_empty": why_empty[idx],
+            })
+        return results
+
+    def folder_gone():
+        return not os.path.exists(path)
 
     metrics.start("Image Fetching (Disk)")
-    for batch_images, batch_paths in data_loader:
+    for batch_images, batch_paths, load_failures in data_loader:
         metrics.stop("Image Fetching (Disk)")
-        batch_load_time = time.time()
-        
-        if not batch_images:
-            metrics.start("Image Fetching (Disk)")
-            print("[WARNING] DataLoader returned an empty batch. Skipping.")
-            continue
+        attempted += len(batch_paths) + len(load_failures)
 
-        batch_start_idx = processed_count + 1
-        batch_end_idx = min(processed_count + len(batch_images), total_images)
-        print(f"\n>>> Processing images {batch_start_idx}-{batch_end_idx} of {total_images} <<<")
-        print(f"--- Loaded batch of {len(batch_images)} images ---")
-        metrics.start("Batch Total Processing")
+        if load_failures and folder_gone():
+            raise FolderUnavailable(
+                f"The folder is no longer accessible: {path} (was a drive or network share disconnected?)")
+        for image_path, reason in load_failures:
+            report("failed", image_path, f"could not read image: {reason}")
 
-        try:
-            # --- 1. Embedding Inference (Universal) ---
-            with torch.no_grad():
-                print(f"  Generating {embedding_model_type.upper()} embeddings...")
-                metrics.start("Image Embedding")
-                embeddings = embedding_model.encode(
-                    batch_images, convert_to_tensor=True, device=device
-                )
-                metrics.stop("Image Embedding")
-
-            embeddings_np = embeddings.float().cpu().numpy()
-            del embeddings
-
-            # --- 1b. Zero-shot tags (SigLIP only): specific labels + their categories ---
-            batch_tags = tagging.tag_embeddings(embedding_model, embeddings_np)
-
-            # --- 2. Image Description (Model Specific) ---
-            final_descriptions = ["" for _ in range(len(batch_paths))]
-            
-            if caption_model_type == "florence2":
-                print("  Generating descriptions via Florence-2...")
-                metrics.start("Florence-2 Inference")
-                
-                florence_prompts = [florence_prompt] * len(batch_images)
-                florence_inputs = caption_processor(text=florence_prompts, images=batch_images, return_tensors="pt")
-                
-                # Ensure inputs match model's precision
-                model_dtype = next(caption_model.parameters()).dtype
-                florence_inputs = {k: v.to(device, model_dtype) if torch.is_floating_point(v) else v.to(device) for k, v in florence_inputs.items()}
-                
-                with torch.no_grad():
-                    florence_generated_ids = caption_model.generate(
-                        **florence_inputs,
-                        max_new_tokens=256,
-                        num_beams=beam_size,
-                        do_sample=False,
-                        use_cache=False 
-                    )
-                
-                florence_generated_texts = caption_processor.batch_decode(florence_generated_ids, skip_special_tokens=False)
-                
-                for i, text in enumerate(florence_generated_texts):
-                    image_size = (batch_images[i].width, batch_images[i].height)
+        if batch_images:
+            log.info("Images %d-%d of %d", attempted - len(batch_paths) - len(load_failures) + 1,
+                     attempted, total_images)
+            metrics.start("Batch Total Processing")
+            try:
+                results = describe_batch(batch_images, batch_paths)
+            except Exception:
+                log.exception("Batch failed; retrying its %d image(s) one at a time", len(batch_paths))
+                results = []
+                for image, image_path in zip(batch_images, batch_paths):
                     try:
-                        parsed = caption_processor.post_process_generation(text, task=florence_prompt, image_size=image_size)
-                        desc_text = parsed[florence_prompt]
+                        results.extend(describe_batch([image], [image_path]))
                     except Exception as e:
-                        desc_text = caption_processor.batch_decode([florence_generated_ids[i]], skip_special_tokens=True)[0]
-                    
-                    final_descriptions[i] = cleanup_text(desc_text)
-                
-                del florence_inputs, florence_generated_ids
-                metrics.stop("Florence-2 Inference")
+                        report("failed", image_path, f"model error: {type(e).__name__}: {e}")
 
-            elif caption_model_type == "ollama":
-                print("  Generating descriptions via Ollama (Parallel)...")
-                metrics.start("Ollama Description")
-                from concurrent.futures import ThreadPoolExecutor
-                
-                def fetch_ollama_description(idx, img_path):
-                    try:
-                        factual_prompt = (
-                            "Describe this image in detail. Be factual. No poetic flair. "
-                            "Do not start with 'The image shows' or 'Here is a description'. "
-                            "Provide ONLY the description itself. No markdown."
-                        )
-                        desc_text = describe_image(
-                            img_path, 
-                            model="gemma3:12b-it-qat", 
-                            provider="ollama",
-                            prompt=factual_prompt
-                        )
-                        return idx, cleanup_text(desc_text)
-                    except Exception as e:
-                        return idx, ""
-
-                with ThreadPoolExecutor(max_workers=len(batch_paths)) as executor:
-                    results = list(executor.map(lambda p: fetch_ollama_description(*p), enumerate(batch_paths)))
-                    for idx, desc in results:
-                        final_descriptions[idx] = desc
-                metrics.stop("Ollama Description")
-
-            # --- 3. Process Results ---
-            print("  Upserting to database...")
+            # --- 3. Save + yield ---
             metrics.start("DB Upsert")
-            for idx, image_path in enumerate(batch_paths):
-                image = batch_images[idx]
-                description_text = final_descriptions[idx] # Use unified description
-                embedding = embeddings_np[idx]
-
-                result = {
-                    "image_path": image_path,
-                    "captions": [], # Explicitly empty as per design decision to unify on description
-                    "description": description_text,
-                    "embedding": embedding,
-                    "width": image.width,
-                    "height": image.height,
-                    "metadata": {
-                        "env": detect_environment(),
-                        "device": str(device),
-                        "batch_size": batch_size,
-                        "embedding_model": embedding_model_type,
-                        "description_model": caption_model_type,
-                        "tags": json.dumps(batch_tags[idx]),
-                    },
-                }
-                
+            for result in results:
+                image_path = result["image_path"]
+                why_empty = result.pop("_why_empty")
                 # Filter out images with empty descriptions to prevent empty embeddings
-                if not description_text:
-                    print(f"[WARNING] Skipping image {image_path} due to empty description.")
+                if not result["description"]:
+                    report("skipped", image_path, why_empty)
                     continue
-
+                try:
+                    for consumer in consumers or []:
+                        consumer(result)
+                except Exception as e:
+                    log.exception("Saving %s failed", image_path)
+                    report("failed", image_path, f"could not save to index: {type(e).__name__}: {e}")
+                    continue
                 processed_count += 1
-
-                if consumers:
-                    for consumer in consumers:
-                        try:
-                            consumer(result)
-                        except Exception as e:
-                            traceback.print_exc()
-
                 yield result
             metrics.stop("DB Upsert")
             metrics.stop("Batch Total Processing")
-            
-            # Final cleanup for the batch
-            del batch_images
-            del embeddings_np
+            del batch_images, results
 
-        except Exception as e:
-            print(f"[ERROR] Batch processing failed: {e}")
-            traceback.print_exc()
-        
         # --- Memory Cleanup ---
         import gc
         gc.collect()
@@ -326,13 +338,12 @@ def process_folder_parallel_caption(
             torch.mps.empty_cache()
         elif "cuda" in str(device):
             torch.cuda.empty_cache()
-        
+
         metrics.start("Image Fetching (Disk)")
 
-    total_end_time = time.time() 
-    metrics.stop("Image Fetching (Disk)") # Stop the last one which might be waiting for EOF
-    print(f"\n--- Processing Summary ---")
-    print(f"Processed {processed_count} images in {total_end_time - total_start_time:.2f} seconds.")
+    total_end_time = time.time()
+    metrics.stop("Image Fetching (Disk)")  # Stop the last one which might be waiting for EOF
+    log.info("Indexed %d of %d images in %.1fs", processed_count, total_images, total_end_time - total_start_time)
     metrics.print_summary()
 
 

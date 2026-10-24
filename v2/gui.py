@@ -8,15 +8,22 @@ from flask import Flask, abort, jsonify, render_template, send_file, request
 V2_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, V2_DIR)
 
+import logging
 import subprocess
 
 import requests
+
+import app_logging
+app_logging.setup()
+log = logging.getLogger("image_converter.app")
+
+import index_jobs
 
 from find_similar import search_similar, invalidate_cache
 import tagging
 from persistence import PersistenceAPI # Import PersistenceAPI
 from caption_image import _get_image_paths, process_folder_parallel_caption
-from jobs import JobRunner
+from jobs import Cancelled, JobRunner
 from duplicates import bp as duplicates_bp
 
 DEFAULT_PORT = 47821  # deliberately not 5000 (macOS AirPlay) / 8080
@@ -290,52 +297,139 @@ def index_preview():
     return jsonify({"folder": folder, "found": len(found), "new": len(todo)})
 
 
-@app.post('/api/index/start')
-def index_start():
-    body = request.get_json(force=True)
-    caption_model = body.get("caption_model", "florence2")
+def _check_caption_model(caption_model):
     if caption_model not in ("florence2", "ollama"):
         abort(400, "caption_model must be florence2 or ollama")
     if caption_model == "ollama":
         ok, msg = _ollama_status()
         if not ok:
             abort(400, msg)
-    folder, recursive, found, todo = _plan_index(body)
-    if not todo:
-        abort(400, "No new images to index in that folder.")
 
-    def consumer(result):
-        emb = result["embedding"]
-        api_siglip.insert_or_update(
-            file_path=result["image_path"],
-            embedding=emb.tolist() if hasattr(emb, "tolist") else emb,
-            captions=[c["text"] for c in result.get("captions", [])],
-            description=result.get("description"),
-            metadata=result.get("metadata", {}),
-            width=result.get("width"),
-            height=result.get("height"),
-        )
+
+def _save_to_index(result):
+    emb = result["embedding"]
+    api_siglip.insert_or_update(
+        file_path=result["image_path"],
+        embedding=emb.tolist() if hasattr(emb, "tolist") else emb,
+        captions=[c["text"] for c in result.get("captions", [])],
+        description=result.get("description"),
+        metadata=result.get("metadata", {}),
+        width=result.get("width"),
+        height=result.get("height"),
+    )
+
+
+def _start_index(folder, recursive, caption_model, todo, origin="new", parent=None):
+    """Start a background indexing run over `todo`, recorded on disk as it goes."""
+    if index_runner.current is not None and index_runner.current.status == "running":
+        abort(409, "An indexing run is already in progress.")
+    rec = index_jobs.create(folder, recursive, caption_model, total=len(todo), origin=origin, parent=parent)
+    log.info("Run %s (%s): %d image(s) from %s, recursive=%s, captions=%s",
+             rec["id"], origin, len(todo), folder, recursive, caption_model)
+
+    def on_issue(kind, path, reason):
+        index_jobs.add_issue(rec, kind, path, reason)
+        index_jobs.save(rec)
 
     def work(job):
         total = len(todo)
         job.progress(0, total, f"Loading models… ({total:,} images to index)")
-        indexed = 0
-        for _ in process_folder_parallel_caption(
-                path=folder, consumers=[consumer], embedding_model_type="siglip",
-                caption_model_type=caption_model, image_paths=todo):
-            indexed += 1
-            job.progress(indexed, total, f"Indexed {indexed:,} of {total:,} images…")
-            job.check_cancelled()
-        invalidate_cache()
-        if indexed < total:
-            job.error = (f"{total - indexed:,} image(s) were skipped: they couldn't be read "
-                         "or the captioner returned no description.")
-        return indexed
+        try:
+            for _ in process_folder_parallel_caption(
+                    path=folder, consumers=[_save_to_index], embedding_model_type="siglip",
+                    caption_model_type=caption_model, image_paths=todo, on_issue=on_issue):
+                rec["indexed"] += 1
+                index_jobs.save(rec)
+                done = rec["indexed"] + len(rec["failed"]) + len(rec["skipped"])
+                job.progress(done, total, f"Indexed {rec['indexed']:,} of {total:,} images…")
+                job.check_cancelled()
+            rec["status"] = index_jobs.DONE
+        except Cancelled:
+            rec["status"] = index_jobs.CANCELLED
+            log.info("Run %s cancelled after %d image(s)", rec["id"], rec["indexed"])
+            raise
+        except Exception as e:
+            rec["status"] = index_jobs.FAILED
+            rec["error"] = f"{type(e).__name__}: {e}"
+            log.exception("Run %s failed after %d image(s)", rec["id"], rec["indexed"])
+            raise
+        finally:
+            index_jobs.save(rec)
+            invalidate_cache()
+        issues = len(rec["failed"]) + len(rec["skipped"])
+        if issues:
+            job.error = f"{issues:,} image(s) failed or were skipped. See the run's details."
+        log.info("Run %s finished: %d indexed, %d failed, %d skipped", rec["id"], rec["indexed"],
+                 len(rec["failed"]), len(rec["skipped"]))
+        return rec["indexed"]
 
     job = index_runner.start("index", work, done_message="Indexed {n:,} image(s).")
     if job is None:
+        rec["status"], rec["error"] = index_jobs.CANCELLED, "Another run was already in progress."
+        index_jobs.save(rec)
         abort(409, "An indexing run is already in progress.")
+    job.meta["record_id"] = rec["id"]
     return jsonify(job.to_json())
+
+
+@app.post('/api/index/start')
+def index_start():
+    body = request.get_json(force=True)
+    caption_model = body.get("caption_model", "florence2")
+    _check_caption_model(caption_model)
+    folder, recursive, found, todo = _plan_index(body)
+    if not todo:
+        abort(400, "No new images to index in that folder.")
+    return _start_index(folder, recursive, caption_model, todo)
+
+
+@app.post('/api/index/runs/<record_id>/resume')
+def index_resume(record_id):
+    """Re-run a past run's folder and options over whatever isn't indexed yet."""
+    rec = index_jobs.get(record_id) or abort(404)
+    _check_caption_model(rec["caption_model"])
+    if not os.path.isdir(rec["folder"]):
+        abort(400, f"The folder isn't accessible right now: {rec['folder']}")
+    folder, recursive, found, todo = _plan_index(
+        {"folder": rec["folder"], "recursive": rec["recursive"], "skip_existing": True})
+    if not todo:
+        abort(400, "Nothing left to do: every image in that folder is already indexed.")
+    return _start_index(folder, recursive, rec["caption_model"], todo, origin="resume", parent=record_id)
+
+
+@app.post('/api/index/runs/<record_id>/retry')
+def index_retry(record_id):
+    """Retry only the images that failed or were skipped in a past run."""
+    rec = index_jobs.get(record_id) or abort(404)
+    _check_caption_model(rec["caption_model"])
+    done = _indexed_paths()
+    todo = sorted({i["path"] for i in rec["failed"] + rec["skipped"]} - done)
+    todo = [p for p in todo if os.path.exists(p)]
+    if not todo:
+        abort(400, "Nothing to retry: those images are indexed now or no longer exist.")
+    return _start_index(rec["folder"], rec["recursive"], rec["caption_model"], todo,
+                        origin="retry", parent=record_id)
+
+
+@app.get('/api/index/runs')
+def index_runs():
+    runs = index_jobs.recent(limit=50)
+    followed_by = {}  # run id -> origin of the later run that resumed/retried it
+    for r in runs:
+        if r.get("parent"):
+            followed_by.setdefault(r["parent"], r["origin"])
+    out = []
+    for r in runs[:8]:
+        s = index_jobs.summary(r)
+        s["followed_by"] = followed_by.get(r["id"])
+        out.append(s)
+    return jsonify({"runs": out, "log_file": app_logging.LOG_FILE})
+
+
+@app.get('/api/log')
+def log_tail():
+    lines = min(max(int(request.args.get("lines", 300)), 1), 5000)
+    return jsonify({"log_file": app_logging.LOG_FILE, "text": app_logging.tail(lines)})
 
 
 @app.get('/api/index/job/<job_id>')
@@ -351,6 +445,11 @@ def index_cancel(job_id):
     return jsonify(job.to_json())
 
 
+_n = index_jobs.mark_interrupted()
+if _n:
+    log.warning("%d indexing run(s) were interrupted when the app last stopped", _n)
+
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description="Run the Image Converter web app.")
@@ -358,5 +457,5 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=int(os.environ.get('IMAGE_CONVERTER_PORT', DEFAULT_PORT)))
     parser.add_argument('--debug', action='store_true')
     args = parser.parse_args()
-    print(f"Image Converter running at http://{args.host}:{args.port}")
+    log.info("Image Converter running at http://%s:%s (log: %s)", args.host, args.port, app_logging.LOG_FILE)
     app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)

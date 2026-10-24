@@ -13,7 +13,7 @@ from model_manager import ModelManager
 from metrics import Metrics # Import Metrics
 
 # Default ChromaDB location: v2/chroma_db, independent of the working directory
-DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chroma_db")
+DEFAULT_DB_PATH = os.environ.get("IMAGE_CONVERTER_DB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "chroma_db")
 
 # Helper function for embedding normalization
 def normalize_embedding(embedding: np.ndarray) -> np.ndarray:

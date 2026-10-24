@@ -24,6 +24,7 @@ class Job:
         self.cancelled = False
         self.started = time.time()
         self.result_count = 0
+        self.meta = {}  # caller-defined extras, e.g. the indexing record id
 
     def progress(self, done, total, message):
         self.done, self.total, self.message = done, total, message
@@ -36,7 +37,7 @@ class Job:
         return {"id": self.id, "kind": self.kind, "status": self.status,
                 "done": self.done, "total": self.total, "message": self.message,
                 "error": self.error, "elapsed": round(time.time() - self.started, 1),
-                "result_count": self.result_count}
+                "result_count": self.result_count, **self.meta}
 
 
 class JobRunner:
