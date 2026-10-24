@@ -22,8 +22,7 @@ _COPY_MARKERS = re.compile(
 )
 
 
-class Cancelled(Exception):
-    pass
+from jobs import Cancelled  # noqa: E402  (shared with the job runner)
 
 
 def is_image(path):

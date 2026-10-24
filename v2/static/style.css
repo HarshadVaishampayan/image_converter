@@ -117,3 +117,16 @@ button:disabled { opacity: .5; cursor: default; }
   .side + .side { border-left: 0; border-top: 1px solid var(--line); }
   .modal-inner { grid-template-columns: 1fr; overflow: auto; }
 }
+
+/* ---- dialog (Add to index) ---- */
+.dialog { width: min(600px, 100%); display: grid; gap: 14px; box-shadow: 0 12px 40px rgba(0, 0, 0, .3); }
+.dialog h2 { margin: 0; }
+.choices { border: 0; padding: 0; margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.choices legend { color: var(--muted); padding: 0; margin-bottom: 6px; }
+.choices label { color: var(--text); align-items: flex-start; border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; cursor: pointer; }
+.choices label:has(input:checked) { border-color: var(--accent); background: var(--chip); }
+.choices input { margin-top: 3px; }
+.banner a { color: inherit; font-weight: 600; }
+@media (max-width: 720px) { .choices { grid-template-columns: 1fr; } }
+.banner.good { background: var(--good-bg); color: var(--good); }

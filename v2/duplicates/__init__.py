@@ -10,10 +10,10 @@ import io
 import os
 import subprocess
 import threading
-import time
-import uuid
 
 from flask import Blueprint, abort, jsonify, render_template, request, send_file
+
+from jobs import JobRunner
 
 from . import core, image_sim
 
@@ -22,8 +22,7 @@ bp = Blueprint("duplicates", __name__, url_prefix="/duplicates")
 # ------------------------------------------------------------------ state ----
 state_lock = threading.Lock()
 state = {"root": None, "files": None, "pairs": {}}  # pairs: key -> pair dict
-jobs = {}
-job_lock = threading.Lock()  # one scan at a time
+runner = JobRunner()  # one scan at a time
 
 
 def _merge_pairs(new_pairs, source):
@@ -43,53 +42,10 @@ def _merge_pairs(new_pairs, source):
                     existing["found_by"].append(source)
 
 
-class Job:
-    def __init__(self, kind):
-        self.id = uuid.uuid4().hex[:12]
-        self.kind = kind
-        self.status = "running"
-        self.done = 0
-        self.total = None
-        self.message = "Starting…"
-        self.error = None
-        self.cancelled = False
-        self.started = time.time()
-        self.result_count = 0
-
-    def progress(self, done, total, message):
-        self.done, self.total, self.message = done, total, message
-
-    def to_json(self):
-        return {"id": self.id, "kind": self.kind, "status": self.status,
-                "done": self.done, "total": self.total, "message": self.message,
-                "error": self.error, "elapsed": round(time.time() - self.started, 1),
-                "result_count": self.result_count}
-
-
 def _start_job(kind, fn):
-    if not job_lock.acquire(blocking=False):
+    job = runner.start(kind, fn)
+    if job is None:
         abort(409, "Another scan is already running.")
-    job = Job(kind)
-    jobs[job.id] = job
-
-    def run():
-        try:
-            job.result_count = fn(job) or 0
-            job.status = "done"
-            job.message = f"Done — {job.result_count:,} result(s)."
-        except core.Cancelled:
-            job.status = "cancelled"
-            job.message = "Cancelled."
-        except Exception as e:  # surface to UI
-            job.status = "error"
-            job.error = f"{type(e).__name__}: {e}"
-            job.message = "Failed."
-            import traceback
-            traceback.print_exc()
-        finally:
-            job_lock.release()
-
-    threading.Thread(target=run, daemon=True).start()
     return jsonify(job.to_json())
 
 
@@ -141,27 +97,6 @@ def status():
     ok, msg = image_sim.available()
     return jsonify({"image_ok": ok, "image_msg": msg, "root": state["root"],
                     "pair_count": len(state["pairs"])})
-
-
-@bp.post("/api/pick-folder")
-def pick_folder():
-    """Open the native macOS folder chooser."""
-    start = request.json.get("start") if request.is_json else None
-    script = 'POSIX path of (choose folder with prompt "Choose a folder to scan for duplicates"'
-    if start and os.path.isdir(start):
-        script += ' default location (POSIX file "%s")' % start.replace('"', '')
-    script += ")"
-    try:
-        out = subprocess.run(["osascript", "-e", script], capture_output=True,
-                             text=True, timeout=600)
-    except Exception as e:
-        return jsonify({"path": None, "error": str(e)})
-    if out.returncode != 0:
-        return jsonify({"path": None})  # user cancelled
-    path = out.stdout.strip()
-    if len(path) > 1:
-        path = path.rstrip("/")
-    return jsonify({"path": path})
 
 
 @bp.post("/api/scan/level1")
@@ -242,13 +177,13 @@ def scan_images():
 
 @bp.get("/api/job/<job_id>")
 def job_status(job_id):
-    job = jobs.get(job_id) or abort(404)
+    job = runner.get(job_id) or abort(404)
     return jsonify(job.to_json())
 
 
 @bp.post("/api/job/<job_id>/cancel")
 def job_cancel(job_id):
-    job = jobs.get(job_id) or abort(404)
+    job = runner.get(job_id) or abort(404)
     job.cancelled = True
     return jsonify(job.to_json())
 

@@ -7,8 +7,14 @@ from flask import Flask, abort, jsonify, render_template, send_file, request
 V2_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, V2_DIR)
 
+import subprocess
+
+import requests
+
 from find_similar import search_similar
 from persistence import PersistenceAPI # Import PersistenceAPI
+from caption_image import _get_image_paths, process_folder_parallel_caption
+from jobs import JobRunner
 from duplicates import bp as duplicates_bp
 
 DEFAULT_PORT = 47821  # deliberately not 5000 (macOS AirPlay) / 8080
@@ -21,6 +27,11 @@ app.register_blueprint(duplicates_bp)
 def _only_local_hosts():
     """Reject DNS-rebinding requests: the app is served to this machine only."""
     if (request.host or "").split(":")[0] not in ("127.0.0.1", "localhost"):
+        abort(403)
+    # JSON API POSTs must carry a custom header (forces a CORS preflight that
+    # this server never approves, so other websites can't trigger them).
+    if request.method == "POST" and request.path.startswith("/api/") \
+            and request.headers.get("X-Requested-By") != "image-converter":
         abort(403)
 
 # Initialize PersistenceAPI globally (once)
@@ -191,6 +202,147 @@ def rebuild_index():
         abort(403)
     api_siglip._rebuild_index()
     return jsonify({"ok": True})
+
+
+# ------------------------------------------------------- shared JSON API ----
+@app.errorhandler(400)
+@app.errorhandler(403)
+@app.errorhandler(409)
+def _api_error(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": e.description}), e.code
+    return e
+
+
+@app.post('/api/pick-folder')
+def pick_folder():
+    """Open the native macOS folder chooser (used by Search and Duplicates)."""
+    body = request.get_json(silent=True) or {}
+    start = body.get("start")
+    prompt = (body.get("prompt") or "Choose a folder").replace('"', "")
+    script = f'POSIX path of (choose folder with prompt "{prompt}"'
+    if start and os.path.isdir(start):
+        script += ' default location (POSIX file "%s")' % start.replace('"', '')
+    script += ")"
+    try:
+        out = subprocess.run(["osascript", "-e", script], capture_output=True,
+                             text=True, timeout=600)
+    except Exception as e:
+        return jsonify({"path": None, "error": str(e)})
+    if out.returncode != 0:
+        return jsonify({"path": None})  # user cancelled
+    path = out.stdout.strip()
+    return jsonify({"path": path.rstrip("/") if len(path) > 1 else path})
+
+
+# ------------------------------------------------------------- indexing ----
+OLLAMA_MODEL = "gemma3:12b-it-qat"  # the model caption_image.py asks Ollama for
+index_runner = JobRunner()
+
+
+def _ollama_status():
+    """(ok, message) for the Ollama captioner."""
+    try:
+        tags = requests.get("http://localhost:11434/api/tags", timeout=1).json()
+    except Exception:
+        return False, "Ollama isn't running on this machine."
+    names = {m.get("name") for m in tags.get("models", [])}
+    if OLLAMA_MODEL not in names:
+        return False, f"Ollama is running but the {OLLAMA_MODEL} model isn't pulled."
+    return True, "ok"
+
+
+def _indexed_paths():
+    entries = api_siglip.collection.get(where={"type": "image"}, include=["metadatas"])
+    return {m.get("file_path") for m in entries.get("metadatas") or []}
+
+
+def _plan_index(body):
+    """Resolve the folder and list the images an index run would process."""
+    folder = os.path.realpath(os.path.expanduser((body.get("folder") or "").strip()))
+    if not os.path.isdir(folder):
+        abort(400, "Folder does not exist.")
+    recursive = bool(body.get("recursive", True))
+    found = _get_image_paths(folder, recursive=recursive)
+    todo = found
+    if body.get("skip_existing", True):
+        done = _indexed_paths()
+        todo = [p for p in found if p not in done]
+    return folder, recursive, found, todo
+
+
+@app.get('/api/index/options')
+def index_options():
+    ok, msg = _ollama_status()
+    return jsonify({"ollama_ok": ok, "ollama_msg": msg,
+                    "busy": index_runner.current is not None and index_runner.current.status == "running",
+                    "current": index_runner.current.to_json() if index_runner.current else None})
+
+
+@app.post('/api/index/preview')
+def index_preview():
+    folder, recursive, found, todo = _plan_index(request.get_json(force=True))
+    return jsonify({"folder": folder, "found": len(found), "new": len(todo)})
+
+
+@app.post('/api/index/start')
+def index_start():
+    body = request.get_json(force=True)
+    caption_model = body.get("caption_model", "florence2")
+    if caption_model not in ("florence2", "ollama"):
+        abort(400, "caption_model must be florence2 or ollama")
+    if caption_model == "ollama":
+        ok, msg = _ollama_status()
+        if not ok:
+            abort(400, msg)
+    folder, recursive, found, todo = _plan_index(body)
+    if not todo:
+        abort(400, "No new images to index in that folder.")
+
+    def consumer(result):
+        emb = result["embedding"]
+        api_siglip.insert_or_update(
+            file_path=result["image_path"],
+            embedding=emb.tolist() if hasattr(emb, "tolist") else emb,
+            captions=[c["text"] for c in result.get("captions", [])],
+            description=result.get("description"),
+            metadata=result.get("metadata", {}),
+            width=result.get("width"),
+            height=result.get("height"),
+        )
+
+    def work(job):
+        total = len(todo)
+        job.progress(0, total, f"Loading models… ({total:,} images to index)")
+        indexed = 0
+        for _ in process_folder_parallel_caption(
+                path=folder, consumers=[consumer], embedding_model_type="siglip",
+                caption_model_type=caption_model, image_paths=todo):
+            indexed += 1
+            job.progress(indexed, total, f"Indexed {indexed:,} of {total:,} images…")
+            job.check_cancelled()
+        if indexed < total:
+            job.error = (f"{total - indexed:,} image(s) were skipped: they couldn't be read "
+                         "or the captioner returned no description.")
+        return indexed
+
+    job = index_runner.start("index", work, done_message="Indexed {n:,} image(s).")
+    if job is None:
+        abort(409, "An indexing run is already in progress.")
+    return jsonify(job.to_json())
+
+
+@app.get('/api/index/job/<job_id>')
+def index_job(job_id):
+    job = index_runner.get(job_id) or abort(404)
+    return jsonify(job.to_json())
+
+
+@app.post('/api/index/job/<job_id>/cancel')
+def index_cancel(job_id):
+    job = index_runner.get(job_id) or abort(404)
+    job.cancelled = True
+    return jsonify(job.to_json())
 
 
 if __name__ == '__main__':

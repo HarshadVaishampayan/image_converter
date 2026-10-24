@@ -26,7 +26,7 @@ $('#more').onclick = () => { shown += 100; render(); };
 
 $('#browse').onclick = async () => {
   $('#browse').disabled = true;
-  try { const r = await api(DUP_API + '/pick-folder', { start: $('#root').value });
+  try { const r = await api('/api/pick-folder', { start: $('#root').value });
         if (r.path) $('#root').value = r.path; }
   catch (e) { showErr(e.message); }
   finally { $('#browse').disabled = false; }

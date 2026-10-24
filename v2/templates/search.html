@@ -13,10 +13,15 @@
       <label for="matches">Matches <input type="number" id="matches" name="matches" value="{{ matches or 10 }}" min="1" max="50"></label>
       <label for="sensitivity">Sensitivity <input type="number" step="0.1" id="sensitivity" name="sensitivity" value="{{ sensitivity or 1.5 }}" min="0.1" max="2.0"></label>
       <button type="submit" class="primary">Search</button>
+      <button type="button" id="addIndex">＋ Add to index…</button>
       <button type="button" class="danger" id="rebuild">Clear index</button>
     </div>
-    <p class="hint" style="margin-top:8px">Sensitivity is the maximum distance (0 = identical, 2 = opposite); lower is stricter. Index images with <code>image_cli.py describe --ip &lt;folder&gt;</code>.</p>
+    <p class="hint" style="margin-top:8px">Sensitivity is the maximum distance (0 = identical, 2 = opposite); lower is stricter.</p>
   </form>
+  <div class="progress panel" id="idxProgress">
+    <div class="bar" id="idxBar"><i></i></div><span id="idxMsg" class="count"></span><button id="idxCancel">Cancel</button>
+  </div>
+  <div class="banner" id="idxDone"></div>
   <div class="banner err" id="err"></div>
 
   <section class="panel">
@@ -47,7 +52,7 @@
       {% endfor %}
     </div>
     {% else %}
-    <div class="empty">{% if query or reference_id %}No images matched. Try raising the sensitivity.{% else %}The index is empty. Index a folder with <code>image_cli.py describe</code>.{% endif %}</div>
+    <div class="empty">{% if query or reference_id %}No images matched. Try raising the sensitivity.{% else %}The index is empty. Use <b>Add to index…</b> to index a folder of images.{% endif %}</div>
     {% endif %}
   </section>
 </main>
@@ -62,6 +67,36 @@
       <div class="path" id="modalPath"></div>
     </div>
   </div>
+</div>
+<div class="modal" id="idxDialog" role="dialog" aria-modal="true" aria-labelledby="idxTitle">
+  <form class="panel dialog" id="idxForm">
+    <h2 id="idxTitle">Add images to the index</h2>
+    <div class="row">
+      <div class="grow"><input type="text" class="mono" id="idxFolder" placeholder="/Users/you/Pictures" spellcheck="false" required></div>
+      <button type="button" id="idxBrowse">Browse…</button>
+    </div>
+    <fieldset class="choices">
+      <legend>Which images?</legend>
+      <label><input type="radio" name="depth" value="recursive" checked> <span><b>Include subfolders</b><br><span class="hint">Every image anywhere inside this folder</span></span></label>
+      <label><input type="radio" name="depth" value="shallow"> <span><b>This folder only</b><br><span class="hint">Just the images directly in it</span></span></label>
+    </fieldset>
+    <div class="row">
+      <label>Descriptions by
+        <select id="idxCaption">
+          <option value="florence2">Florence-2 (built in)</option>
+          <option value="ollama">Ollama · gemma3</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="idxSkip" checked> Skip images already indexed</label>
+    </div>
+    <p class="hint" id="idxOllama"></p>
+    <div class="count" id="idxPreview">Choose a folder to see how many images will be indexed.</div>
+    <div class="row" style="justify-content:flex-end">
+      <button type="button" id="idxClose">Cancel</button>
+      <button type="submit" class="primary" id="idxStart" disabled>Start indexing</button>
+    </div>
+    <p class="hint">JPG and PNG files. Hidden files and folders are skipped. The first run downloads the models.</p>
+  </form>
 </div>
 {% endblock %}
 
@@ -88,7 +123,97 @@ document.querySelector('.grid')?.addEventListener('click', (e) => {
 const close = () => modal.classList.remove('on');
 document.getElementById('modalClose').onclick = close;
 modal.onclick = (e) => { if (e.target === modal) close(); };
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { close(); closeIdx(); } });
+
+// ---------------------------------------------------------- Add to index ----
+const $ = (s) => document.querySelector(s);
+const dlg = $('#idxDialog');
+const showErr = (m) => { $('#err').textContent = m || ''; $('#err').classList.toggle('on', !!m); };
+const opts = () => ({ folder: $('#idxFolder').value.trim(),
+  recursive: document.querySelector('input[name=depth]:checked').value === 'recursive',
+  skip_existing: $('#idxSkip').checked });
+let ollamaOk = false, idxJob = null, previewSeq = 0;
+
+function closeIdx() { dlg.classList.remove('on'); }
+$('#idxClose').onclick = closeIdx;
+dlg.onclick = (e) => { if (e.target === dlg) closeIdx(); };
+
+$('#addIndex').onclick = async () => {
+  try { $('#idxFolder').value = localStorage.getItem('index.folder') || ''; } catch {}
+  const o = await api('/api/index/options').catch(() => ({}));
+  ollamaOk = !!o.ollama_ok;
+  $('#idxCaption').querySelector('[value=ollama]').disabled = !ollamaOk;
+  if (!ollamaOk) $('#idxCaption').value = 'florence2';
+  $('#idxOllama').textContent = ollamaOk ? '' : `Ollama unavailable: ${o.ollama_msg || ''}`;
+  dlg.classList.add('on');
+  $('#idxFolder').focus();
+  preview();
+};
+
+$('#idxBrowse').onclick = async () => {
+  $('#idxBrowse').disabled = true;
+  try {
+    const r = await api('/api/pick-folder', { start: $('#idxFolder').value, prompt: 'Choose a folder of images to index' });
+    if (r.path) { $('#idxFolder').value = r.path; preview(); }
+  } catch (x) { $('#idxPreview').textContent = x.message; }
+  finally { $('#idxBrowse').disabled = false; }
+};
+
+let previewTimer;
+['#idxFolder', '#idxSkip'].forEach((s) => $(s).addEventListener('input', () => { clearTimeout(previewTimer); previewTimer = setTimeout(preview, 300); }));
+document.querySelectorAll('input[name=depth]').forEach((r) => r.onchange = preview);
+
+async function preview() {
+  const o = opts(), seq = ++previewSeq;
+  $('#idxStart').disabled = true;
+  if (!o.folder) { $('#idxPreview').textContent = 'Choose a folder to see how many images will be indexed.'; return; }
+  $('#idxPreview').textContent = 'Counting images…';
+  try {
+    const r = await api('/api/index/preview', o);
+    if (seq !== previewSeq) return;  // a newer preview is in flight
+    const skipped = r.found - r.new;
+    $('#idxPreview').innerHTML = r.found === 0 ? 'No JPG or PNG images found here.'
+      : `<b>${r.new.toLocaleString()}</b> image${r.new === 1 ? '' : 's'} to index` +
+        (skipped ? ` <span class="hint">(${skipped.toLocaleString()} already indexed)</span>` : '');
+    $('#idxStart').disabled = r.new === 0;
+  } catch (x) { if (seq === previewSeq) $('#idxPreview').textContent = x.message; }
+}
+
+$('#idxForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const o = { ...opts(), caption_model: $('#idxCaption').value };
+  try { localStorage.setItem('index.folder', o.folder); } catch {}
+  try {
+    const job = await api('/api/index/start', o);
+    closeIdx(); showErr(''); track(job.id);
+  } catch (x) { $('#idxPreview').textContent = x.message; }
+};
+
+function track(id) {
+  idxJob = id;
+  $('#idxProgress').classList.add('on');
+  $('#idxDone').classList.remove('on');
+  $('#addIndex').disabled = true;
+  poll();
+}
+async function poll() {
+  const j = await api('/api/index/job/' + idxJob).catch((x) => ({ status: 'error', error: x.message }));
+  $('#idxBar').classList.toggle('indet', !j.done);
+  if (j.total) $('#idxBar').firstElementChild.style.width = Math.round(100 * j.done / j.total) + '%';
+  $('#idxMsg').textContent = `${j.message || ''}  (${Math.round(j.elapsed || 0)}s)`;
+  if (j.status === 'running') return setTimeout(poll, 1000);
+  $('#idxProgress').classList.remove('on');
+  $('#addIndex').disabled = false;
+  if (j.status === 'error') return showErr(j.error);
+  const b = $('#idxDone');
+  b.innerHTML = `${j.message}${j.error ? ' ' + j.error : ''} <a href="{{ url_for('search_form') }}">Refresh results</a>`;
+  b.classList.toggle('good', !j.error && j.status === 'done');
+  b.classList.add('on');
+}
+$('#idxCancel').onclick = () => idxJob && api(`/api/index/job/${idxJob}/cancel`, {});
+
+// Resume the progress bar if an indexing run is already going (e.g. after a reload)
+api('/api/index/options').then((o) => { if (o.busy && o.current) track(o.current.id); }).catch(() => {});
 
 document.getElementById('rebuild').onclick = async () => {
   if (!confirm('Clear the SigLIP search index?\n\nThis deletes all indexed embeddings and descriptions. Your image files are not touched. You will need to re-index afterwards.')) return;

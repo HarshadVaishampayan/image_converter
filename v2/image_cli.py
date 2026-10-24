@@ -86,7 +86,8 @@ def stats(model):
 @click.option('--embed-model', default='siglip', type=click.Choice(['clip', 'siglip']), help='Embedding model to use.')
 @click.option('--cap-model', default='ollama', type=click.Choice(['florence2', 'ollama']), help='Captioning/Description model to use.')
 @click.option('--chroma-path', default=None, help='Path to the ChromaDB data directory (default: v2/chroma_db).')
-def describe(ip, embed_model, cap_model, chroma_path):
+@click.option('--shallow', is_flag=True, help='Only index images directly in the folder, not in subfolders.')
+def describe(ip, embed_model, cap_model, chroma_path, shallow):
     """Describe images and index them using the selected models."""
     click.echo(f"-START INDEXING (Embed: {embed_model.upper()} | Cap: {cap_model.upper()})-")
     
@@ -96,7 +97,8 @@ def describe(ip, embed_model, cap_model, chroma_path):
         path=ip,
         consumers=[print_consumer, persist_consumer],
         embedding_model_type=embed_model,
-        caption_model_type=cap_model
+        caption_model_type=cap_model,
+        recursive=not shallow,
     ):
         pass
     click.echo("=END=")

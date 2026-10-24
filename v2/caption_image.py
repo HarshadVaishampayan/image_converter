@@ -57,17 +57,23 @@ def cleanup_text(text: str) -> str:
         
     return text
 
-def _get_image_paths(path: str) -> List[str]:
-    """Helper function to recursively get all image paths."""
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
+
+
+def _get_image_paths(path: str, recursive: bool = True) -> List[str]:
+    """Get image paths under `path` (all subfolders if recursive, else top level only)."""
     image_paths = []
     if os.path.isfile(path):
-        if path.lower().endswith((".jpg", ".jpeg", ".png")):
+        if path.lower().endswith(IMAGE_EXTENSIONS):
             image_paths.append(path)
     elif os.path.isdir(path):
-        for root, _, files in os.walk(path):
-            for file in files:
-                if file.lower().endswith((".jpg", ".jpeg", ".png")):
+        for root, dirs, files in os.walk(path):
+            dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+            for file in sorted(files):
+                if file.lower().endswith(IMAGE_EXTENSIONS) and not file.startswith("."):
                     image_paths.append(os.path.join(root, file))
+            if not recursive:
+                break
     return image_paths
 
 
@@ -108,12 +114,16 @@ def process_folder_parallel_caption(
     cache_file: str = None,
     max_workers: int = None,
     embedding_model_type: str = "siglip",
-    caption_model_type: str = "ollama"
+    caption_model_type: str = "ollama",
+    recursive: bool = True,
+    image_paths: List[str] = None,
 ) -> Generator:
     """
-    Process images in a directory recursively using:
+    Process images in a directory (recursively by default) using:
     1. Selected caption model (Florence-2 or Ollama) for description.
     2. Selected embedding model (CLIP/SigLIP) for vectors.
+
+    Pass `image_paths` to process an explicit list instead of scanning `path`.
     """
     metrics = Metrics()
     metrics.reset()
@@ -134,7 +144,7 @@ def process_folder_parallel_caption(
     device = model_manager.device
 
     # Get all image paths recursively
-    paths_to_process = _get_image_paths(path)
+    paths_to_process = image_paths if image_paths is not None else _get_image_paths(path, recursive)
     if not paths_to_process:
         print(f"Error: No valid images found in {path}")
         return
