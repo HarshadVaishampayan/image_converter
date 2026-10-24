@@ -35,7 +35,8 @@ This README covers: a feature guide, quick setup, usage examples (CLI and web), 
 
 5. Interfaces
    - `v2/image_cli.py`: Click-based CLI exposing ingestion, search, inspection, cleanup, stats, and web server startup.
-   - `v2/gui.py`: Flask app used by the `web` CLI command to display search results in a grid.
+   - `v2/gui.py`: Flask app used by the `web` CLI command, with a Search page (image grid) and a Duplicates page.
+   - `v2/duplicates/`: duplicate-file finder: name + size candidates, then exact-byte or SigLIP 2 image-similarity confirmation, with move-to-Trash.
 
 6. Model & resource management
    - `v2/model_manager.py` centralizes model loading and device detection (CUDA / MPS / CPU). Use environment variables such as `HF_TOKEN` for private HF models.
@@ -78,7 +79,8 @@ pip install -r requirements.txt
 
 Notes on dependency files
 
-- `requirements.txt`, `requirements_mac.txt`, `requirements310.txt`, and `requirements312.txt` exist to support different targets. Prefer `v2/requirements.txt` for the primary v2 development path.
+- `v2/requirements.txt` is the single dependency list for v2 on every platform (torch's default wheels cover Apple MPS, Linux CUDA and CPU). Python 3.12–3.14.
+- Embeddings use **SigLIP 2** (`google/siglip2-so400m-patch14-384`); Florence-2 captions use the native transformers port (`florence-community/Florence-2-large`). Indexes built with the older SigLIP model must be re-indexed (`image_cli.py purge` then `describe`).
 
 Configure model credentials (optional)
 
@@ -118,8 +120,9 @@ python v2/image_cli.py inspect --image-path /path/to/image.jpg --embed-model sig
 Run the web UI (Flask):
 
 ```bash
-python v2/image_cli.py web --host 0.0.0.0 --port 5000
-# Then open http://localhost:5000
+python v2/image_cli.py web          # or: python v2/gui.py
+# Then open http://127.0.0.1:47821  (Search and Duplicates tabs)
+# The server only answers on 127.0.0.1/localhost; change the port with --port or IMAGE_CONVERTER_PORT.
 ```
 
 Cleanup empty text embeddings (captions/description chunks):

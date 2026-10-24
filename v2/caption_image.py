@@ -357,7 +357,7 @@ def print_consumer(data: Dict[str, Any]):
 # ------------------------------
 # Persistence consumer
 # ------------------------------
-def make_persistence_consumer(collection_name: str = None, path: str = "./chroma_db", embedding_model_type: str = "clip"):
+def make_persistence_consumer(collection_name: str = None, path: str = None, embedding_model_type: str = "clip"):
     """
     Returns a consumer that writes image, captions, description, metadata, and embedding
     into ChromaDB via PersistenceAPI.
@@ -402,7 +402,7 @@ if __name__ == "__main__":
     
     cache = "processed_cache.jsonl"
     # Add the persistence consumer alongside the print consumer
-    persist_consumer = make_persistence_consumer(path="./chroma_db", embedding_model_type=args.model)
+    persist_consumer = make_persistence_consumer(embedding_model_type=args.model)
     for _ in process_folder_parallel_caption(
         path=args.image_path,
         consumers=[print_consumer, persist_consumer],

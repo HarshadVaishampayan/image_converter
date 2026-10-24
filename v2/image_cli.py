@@ -85,7 +85,7 @@ def stats(model):
 @click.option('--ip', required=True, help='Path to the image file or directory.')
 @click.option('--embed-model', default='siglip', type=click.Choice(['clip', 'siglip']), help='Embedding model to use.')
 @click.option('--cap-model', default='ollama', type=click.Choice(['florence2', 'ollama']), help='Captioning/Description model to use.')
-@click.option('--chroma-path', default='./chroma_db', help='Path to the ChromaDB data directory.')
+@click.option('--chroma-path', default=None, help='Path to the ChromaDB data directory (default: v2/chroma_db).')
 def describe(ip, embed_model, cap_model, chroma_path):
     """Describe images and index them using the selected models."""
     click.echo(f"-START INDEXING (Embed: {embed_model.upper()} | Cap: {cap_model.upper()})-")
@@ -188,14 +188,15 @@ def inspect(image_path, embed_model):
 
 @cli.command()
 @click.option('--host', default='127.0.0.1', help='The interface to bind to.')
-@click.option('--port', default=5000, type=int, help='The port to listen on.')
+@click.option('--port', default=47821, type=int, help='The port to listen on.')
 @click.option('--debug', is_flag=True, help='Enable debug mode.')
 def web(host, port, debug):
     """Run the Flask web application."""
-    os.environ['FLASK_APP'] = 'gui.py'
-    if debug: os.environ['FLASK_DEBUG'] = '1'
-    flask_cmd = [sys.executable, '-m', 'flask', 'run', '--host', host, '--port', str(port)]
-    subprocess.run(flask_cmd)
+    gui = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gui.py')
+    cmd = [sys.executable, gui, '--host', host, '--port', str(port)]
+    if debug:
+        cmd.append('--debug')
+    subprocess.run(cmd)
 
 if __name__ == '__main__':
     cli()

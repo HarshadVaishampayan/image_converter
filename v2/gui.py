@@ -1,12 +1,27 @@
-from flask import Flask, render_template, send_file, request
-from find_similar import search_similar
 import os
+import sys
+
+from flask import Flask, abort, jsonify, render_template, send_file, request
+
+# Make sibling modules importable regardless of the working directory
+V2_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, V2_DIR)
+
+from find_similar import search_similar
 from persistence import PersistenceAPI # Import PersistenceAPI
+from duplicates import bp as duplicates_bp
+
+DEFAULT_PORT = 47821  # deliberately not 5000 (macOS AirPlay) / 8080
 
 app = Flask(__name__)
+app.register_blueprint(duplicates_bp)
 
-# Create templates directory if it doesn't exist
-os.makedirs('templates', exist_ok=True)
+
+@app.before_request
+def _only_local_hosts():
+    """Reject DNS-rebinding requests: the app is served to this machine only."""
+    if (request.host or "").split(":")[0] not in ("127.0.0.1", "localhost"):
+        abort(403)
 
 # Initialize PersistenceAPI globally (once)
 # This prevents "Too many open files" errors by reusing the ChromaDB client
@@ -46,6 +61,7 @@ def get_images_from_db(query: str = None, image_id: str = None, top_k: int = 6, 
             images.append({
                 'id': result.get('image_id', ''),
                 'url': f"/images/{result.get('image_id', '')}",
+                'file_path': result.get('file_path', ''),
                 'score': f"{result.get('hybrid_score', 0):.4f}",
                 'captions': result.get('captions', []),
                 'description': result.get('description', '')
@@ -74,6 +90,7 @@ def search_form():
                 initial_images.append({
                     'id': img['image_id'],
                     'url': f"/images/{img['image_id']}",
+                    'file_path': img.get('file_path', ''),
                     'score': '',
                     'captions': img['captions'],
                     'description': img.get('description', '')
@@ -81,10 +98,10 @@ def search_form():
     except Exception as e:
         print(f"Error loading initial images: {e}")
 
-    return render_template('grid.html', 
-                           images=initial_images, 
-                           columns=3, 
-                           query=None, 
+    return render_template('search.html',
+                           active='search',
+                           images=initial_images,
+                           query=None,
                            matches=10,
                            sensitivity=0.5,
                            reference_id=None)
@@ -134,12 +151,13 @@ def image_grid():
             sensitivity=sensitivity
         )
         
-    return render_template('grid.html', 
-                         images=images, 
-                         columns=3, 
+    return render_template('search.html',
+                         active='search',
+                         images=images,
                          query=query,
                          matches=matches,
-                         sensitivity=sensitivity)
+                         sensitivity=sensitivity,
+                         reference_id=image_id)
 
 @app.route('/images/<image_id>')
 def serve_image(image_id):
@@ -166,8 +184,21 @@ def serve_image(image_id):
         print(f"Error serving image: {e}")
         return "Server error", 500
 
-@app.route('/rebuildindex', methods=['GET'])
+@app.route('/rebuildindex', methods=['POST'])
 def rebuild_index():
-    # Code to rebuild the search index goes here
-    search_similar(force_rebuild=True, embedding_model_type='siglip')
-    return 'Done'
+    """Clear the SigLIP collection (destructive, so POST + custom header only)."""
+    if request.headers.get("X-Requested-By") != "image-converter":
+        abort(403)
+    api_siglip._rebuild_index()
+    return jsonify({"ok": True})
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description="Run the Image Converter web app.")
+    parser.add_argument('--host', default='127.0.0.1')
+    parser.add_argument('--port', type=int, default=int(os.environ.get('IMAGE_CONVERTER_PORT', DEFAULT_PORT)))
+    parser.add_argument('--debug', action='store_true')
+    args = parser.parse_args()
+    print(f"Image Converter running at http://{args.host}:{args.port}")
+    app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)

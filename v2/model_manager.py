@@ -2,8 +2,8 @@ import os
 import platform
 import torch
 from transformers import (
-    AutoProcessor, 
-    AutoModelForCausalLM
+    AutoProcessor,
+    AutoModelForImageTextToText
 )
 from sentence_transformers import SentenceTransformer
 
@@ -34,32 +34,31 @@ def get_device() -> torch.device:
 def load_models(env: str, device: torch.device):
     """Load configuration for captioning and multiple embedding models."""
     if env == "desktop":
-        caption_model_name = "microsoft/Florence-2-large"
+        caption_model_name = "florence-community/Florence-2-large"  # native transformers port
         clip_name = "sentence-transformers/clip-ViT-L-14"
-        siglip_name = "google/siglip-so400m-patch14-384" # SigLIP Large
+        siglip_name = "google/siglip2-so400m-patch14-384"  # SigLIP 2 (shape-optimized 400M)
         batch_size = 2 
         beam_size = 1 
     else:
-        caption_model_name = "microsoft/Florence-2-base"
+        caption_model_name = "florence-community/Florence-2-base"
         clip_name = "sentence-transformers/clip-ViT-B-32-multilingual-v1"
-        siglip_name = "google/siglip-base-patch16-224"
+        siglip_name = "google/siglip2-base-patch16-224"
         batch_size = 1
         beam_size = 1
 
     return caption_model_name, clip_name, siglip_name, batch_size, beam_size
 
 class SigLIPWrapper:
-    """Wrapper for SigLIP models to provide a SentenceTransformer-compatible interface."""
+    """Wrapper for SigLIP / SigLIP 2 models to provide a SentenceTransformer-compatible interface."""
     def __init__(self, model_name, device):
         from transformers import AutoProcessor, AutoModel
         import torch
         print(f"Loading SigLIP ({model_name}) via Transformers...")
         self.processor = AutoProcessor.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(
-            model_name, 
-            torch_dtype=torch.float16,
-            trust_remote_code=True
-        ).to(device)
+            model_name,
+            dtype=torch.float16,
+        ).to(device).eval()
         self.device = device
 
     def encode(self, input_data, convert_to_tensor=True, device=None):
@@ -87,6 +86,10 @@ class SigLIPWrapper:
             else:
                 inputs = self.processor(images=input_data, return_tensors="pt").to(self.device)
                 features = self.model.get_image_features(**inputs)
+
+            # transformers 5 may return a ModelOutput instead of a bare tensor
+            if hasattr(features, "pooler_output"):
+                features = features.pooler_output
             
             # Normalize for cosine similarity
             features = torch.nn.functional.normalize(features, p=2, dim=-1)
@@ -134,7 +137,7 @@ class ModelManager:
             print("Loading CLIP model...")
             self.clip_model = SentenceTransformer(
                 self.clip_name, 
-                model_kwargs={"torch_dtype": torch.float16}
+                model_kwargs={"dtype": torch.float16}
             ).to(self.device)
         return self.clip_model
 
@@ -157,18 +160,14 @@ class ModelManager:
             print(f"Loading Caption model ({self.caption_model_name})...")
             token = os.getenv("HF_TOKEN")
             self.caption_processor = AutoProcessor.from_pretrained(
-                self.caption_model_name, 
-                trust_remote_code=True,
+                self.caption_model_name,
                 token=token,
-                use_fast=True
             )
             # Use float32 for Florence-2 on MPS for stability
-            self.caption_model = AutoModelForCausalLM.from_pretrained(
-                self.caption_model_name, 
-                trust_remote_code=True,
+            self.caption_model = AutoModelForImageTextToText.from_pretrained(
+                self.caption_model_name,
                 token=token,
-                torch_dtype=torch.float32,
-                attn_implementation="eager"
-            ).to(self.device)
+                dtype=torch.float32,
+            ).to(self.device).eval()
                 
         return self.caption_processor, self.caption_model, self.beam_size, self.batch_size

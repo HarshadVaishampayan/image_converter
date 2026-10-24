@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Search · Image Converter{% endblock %}
+{% block content %}
+<div class="page-intro">
+  <h1>Search</h1>
+  <p>Find indexed images by description, or pick one and find visually similar images.</p>
+</div>
+<main>
+  <form class="panel" method="POST" action="{{ url_for('image_grid') }}" id="searchForm">
+    <div class="row">
+      <div class="grow"><input type="text" name="query" value="{{ query or '' }}" placeholder="e.g. red car parked on a street" autofocus></div>
+      <input type="hidden" name="image_id" value="">
+      <label for="matches">Matches <input type="number" id="matches" name="matches" value="{{ matches or 10 }}" min="1" max="50"></label>
+      <label for="sensitivity">Sensitivity <input type="number" step="0.1" id="sensitivity" name="sensitivity" value="{{ sensitivity or 1.5 }}" min="0.1" max="2.0"></label>
+      <button type="submit" class="primary">Search</button>
+      <button type="button" class="danger" id="rebuild">Clear index</button>
+    </div>
+    <p class="hint" style="margin-top:8px">Sensitivity is the maximum distance (0 = identical, 2 = opposite); lower is stricter. Index images with <code>image_cli.py describe --ip &lt;folder&gt;</code>.</p>
+  </form>
+  <div class="banner err" id="err"></div>
+
+  <section class="panel">
+    <div class="toolbar">
+      <h2 style="margin:0">
+        {% if query %}Results for “{{ query }}”
+        {% elif reference_id %}Similar to the selected image
+        {% elif images %}A few indexed images
+        {% else %}Results{% endif %}
+      </h2>
+      <span class="count">{{ images|length }} image{{ '' if images|length == 1 else 's' }}</span>
+    </div>
+    {% if images %}
+    <div class="grid">
+      {% for image in images %}
+      <div class="card">
+        <img src="{{ image.url }}" alt="" loading="lazy"
+             data-src="{{ image.url }}" data-desc="{{ image.description }}" data-path="{{ image.file_path or '' }}">
+        <div class="body">
+          {% if image.captions %}<div class="caption">{{ image.captions[0] }}</div>
+          {% elif image.description %}<div class="caption">{{ image.description }}</div>{% endif %}
+        </div>
+        <div class="foot">
+          {% if image.score %}<span class="badge">Distance {{ image.score }}</span>{% else %}<span></span>{% endif %}
+          <button type="button" data-similar="{{ image.id }}">Find similar</button>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">{% if query or reference_id %}No images matched. Try raising the sensitivity.{% else %}The index is empty. Index a folder with <code>image_cli.py describe</code>.{% endif %}</div>
+    {% endif %}
+  </section>
+</main>
+
+<div class="modal" id="modal">
+  <button class="modal-close" id="modalClose" aria-label="Close">&times;</button>
+  <div class="modal-inner">
+    <img id="modalImg" alt="">
+    <div class="modal-side">
+      <h2 style="margin:0;font-size:15px">Description</h2>
+      <div id="modalDesc"></div>
+      <div class="path" id="modalPath"></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const form = document.getElementById('searchForm');
+const modal = document.getElementById('modal');
+
+document.querySelector('.grid')?.addEventListener('click', (e) => {
+  const sim = e.target.closest('[data-similar]');
+  if (sim) {
+    form.image_id.value = sim.dataset.similar;
+    form.query.value = '';
+    return form.submit();
+  }
+  const img = e.target.closest('img[data-src]');
+  if (img) {
+    document.getElementById('modalImg').src = img.dataset.src;
+    document.getElementById('modalDesc').textContent = img.dataset.desc || 'No description available.';
+    document.getElementById('modalPath').textContent = img.dataset.path;
+    modal.classList.add('on');
+  }
+});
+const close = () => modal.classList.remove('on');
+document.getElementById('modalClose').onclick = close;
+modal.onclick = (e) => { if (e.target === modal) close(); };
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+
+document.getElementById('rebuild').onclick = async () => {
+  if (!confirm('Clear the SigLIP search index?\n\nThis deletes all indexed embeddings and descriptions. Your image files are not touched. You will need to re-index afterwards.')) return;
+  try { await api('{{ url_for("rebuild_index") }}', {}); location.href = '{{ url_for("search_form") }}'; }
+  catch (x) { const b = document.getElementById('err'); b.textContent = x.message; b.classList.add('on'); }
+};
+</script>
+{% endblock %}

@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Duplicates · Image Converter{% endblock %}
+{% block content %}
+<div class="page-intro">
+  <h1>Duplicates</h1>
+  <p>Find duplicate files anywhere under a folder. Level 1 matches on name and size; Level 2 confirms by bytes or by image similarity.</p>
+</div>
+<main>
+  <section class="panel">
+    <h2>📁 Folder</h2>
+    <div class="row">
+      <div class="grow"><input type="text" class="mono" id="root" placeholder="/Users/you/Pictures" spellcheck="false"></div>
+      <button id="browse">Browse…</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label><input type="checkbox" id="hidden"> Include hidden files/folders</label>
+      <label><input type="checkbox" id="skipEmpty" checked> Skip empty files</label>
+      <label>Min size <input type="number" id="minSize" value="0" min="0"> KB</label>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2><span class="step">1</span> Level 1: name similarity + size match</h2>
+    <div class="row">
+      <label>Name similarity ≥ <input type="range" id="nameT" min="30" max="100" value="70"> <b id="nameTv">70%</b></label>
+      <label>Size tolerance ± <input type="number" id="sizeTol" value="0" min="0" max="50" step="0.5"> %</label>
+      <button class="primary" id="runL1">Find candidates</button>
+    </div>
+    <p class="hint" style="margin-top:8px">Names are compared case-insensitively, ignoring copy markers like “(1)”, “copy”, “ - Copy (2)”. Size tolerance 0 means exact size.</p>
+  </section>
+
+  <section class="panel">
+    <h2><span class="step">2</span> Level 2: confirm duplicates</h2>
+    <div class="row" style="margin-bottom:10px">
+      <span class="count">Scope:</span>
+      <div class="seg" id="scope">
+        <button data-v="pairs" class="on">Level-1 candidates</button>
+        <button data-v="tree">Entire folder</button>
+      </div>
+      <span class="hint">“Entire folder” also finds renamed copies (bytes) and resized or re-encoded images.</span>
+    </div>
+    <div class="l2">
+      <div>
+        <h3>2a · Exact byte match</h3>
+        <p class="hint">SHA-256 compares full file contents. Works for every file type.</p>
+        <div><button class="primary" id="runBytes" disabled>Compare bytes</button></div>
+      </div>
+      <div>
+        <h3>2b · Image similarity</h3>
+        <p class="hint">Embeds images with the same model as Search and compares cosine similarity. The first run downloads the model.</p>
+        <div class="row">
+          <label>Model <select id="model"><option value="siglip">SigLIP 2 so400m (~4.5 GB)</option><option value="clip">CLIP ViT-L/14 (~1.7 GB)</option></select></label>
+          <label>Similarity ≥ <input type="range" id="imgT" min="70" max="100" value="92"> <b id="imgTv">0.92</b></label>
+        </div>
+        <div><button class="primary" id="runImg" disabled>Compare images</button></div>
+      </div>
+    </div>
+    <div class="banner {{ '' if image_ok else 'on' }}" id="imgBanner" style="margin-top:10px">{{ image_msg if not image_ok else '' }}</div>
+  </section>
+
+  <div class="progress panel" id="progress">
+    <div class="bar" id="bar"><i></i></div><span id="msg"></span><button id="cancel">Cancel</button>
+  </div>
+  <div class="banner err" id="err"></div>
+
+  <section class="panel">
+    <div class="toolbar">
+      <h2 style="margin:0">Results</h2>
+      <div class="seg" id="filter">
+        <button data-v="all" class="on">All</button>
+        <button data-v="bytes">Byte-identical</button>
+        <button data-v="image">Similar images</button>
+        <button data-v="unverified">Unverified</button>
+        <button data-v="different">Bytes differ</button>
+      </div>
+      <input type="text" id="search" placeholder="Filter by path…" style="width:220px">
+      <select id="sort">
+        <option value="size">Largest first</option>
+        <option value="name">Name similarity</option>
+        <option value="image">Image similarity</option>
+        <option value="path">Path</option>
+      </select>
+      <span class="count" id="count"></span>
+    </div>
+    <div id="list"><div class="empty">Choose a folder and run Level 1 to get started.</div></div>
+    <div style="text-align:center"><button id="more" style="display:none">Show more</button></div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>window.DUP_API = '{{ url_for("duplicates.page") }}api'; window.IMAGE_OK = {{ 'true' if image_ok else 'false' }};</script>
+<script src="{{ url_for('static', filename='duplicates.js') }}"></script>
+{% endblock %}

@@ -12,6 +12,9 @@ from chromadb.utils import embedding_functions
 from model_manager import ModelManager 
 from metrics import Metrics # Import Metrics
 
+# Default ChromaDB location: v2/chroma_db, independent of the working directory
+DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chroma_db")
+
 # Helper function for embedding normalization
 def normalize_embedding(embedding: np.ndarray) -> np.ndarray:
     """Normalize embedding vector to unit length."""
@@ -25,7 +28,8 @@ class PersistenceAPI:
     Persistence API using ChromaDB for metadata and vector indexing.
     """
 
-    def __init__(self, collection_name: str = None, path: str = "./chroma_db", embedding_model_type: str = "clip"):
+    def __init__(self, collection_name: str = None, path: str = None, embedding_model_type: str = "clip"):
+        path = path or DEFAULT_DB_PATH
         self.embedding_model_type = embedding_model_type
         self.model_manager = ModelManager() 
         

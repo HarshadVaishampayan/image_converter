@@ -16,10 +16,7 @@
 2. **Install dependencies**
 	```sh
 	pip install --upgrade pip
-	pip install -r requirements.txt
-	# Or for specific Python versions:
-	# pip install -r requirements310.txt  # for Python 3.10 + CUDA
-	# pip install -r requirements312.txt  # for Python 3.12 (CPU-only)
+	pip install -r requirements.txt   # one file for macOS (MPS), Linux (CUDA) and CPU; Python 3.12–3.14
 	```
 
 3. **(Optional, for GPU/CUDA users)**
@@ -85,5 +82,6 @@ for img in /path/to/images/*.[jJpP][pPnNgG]*; do python run_describe_image.py --
 - **describe_image.py**: Describes images using either a local Ollama model or Hugging Face pipeline (API/local). Supports provider/model/device selection and robust error handling.
 - **run_describe_image.py**: Command-line interface for image description. Handles batch processing, logging, timing, and calls `describe_image` with all CLI parameters.
 - **test_convert_image.py**: Unit tests for image conversion logic, covering resizing, color, format, and error cases.
-- **requirements.txt / requirements310.txt / requirements312.txt**: Dependency lists for different Python versions and environments (see comments in each file).
+- **requirements.txt**: Single dependency list for all platforms (torch 2.14, transformers 5, sentence-transformers 6, chromadb 1.5, numpy 2).
+- **duplicates/**: Flask blueprint for the Duplicates page (Level 1: name + size; Level 2: exact bytes or image similarity via `ModelManager`).
 - **.gitignore**: Standard Python/Venv ignores.
