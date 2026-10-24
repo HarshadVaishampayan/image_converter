@@ -130,3 +130,5 @@ button:disabled { opacity: .5; cursor: default; }
 .banner a { color: inherit; font-weight: 600; }
 @media (max-width: 720px) { .choices { grid-template-columns: 1fr; } }
 .banner.good { background: var(--good-bg); color: var(--good); }
+.card .tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.card .tags .badge { font-size: 11px; padding: 1px 7px; }

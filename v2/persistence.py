@@ -30,6 +30,7 @@ class PersistenceAPI:
 
     def __init__(self, collection_name: str = None, path: str = None, embedding_model_type: str = "clip"):
         path = path or DEFAULT_DB_PATH
+        self.path = path
         self.embedding_model_type = embedding_model_type
         self.model_manager = ModelManager() 
         

@@ -17,6 +17,7 @@ import traceback
 import argparse
 import re
 from metrics import Metrics
+import tagging
 
 # ------------------------------
 # Helper Functions and Classes
@@ -195,8 +196,11 @@ def process_folder_parallel_caption(
                 )
                 metrics.stop("Image Embedding")
 
-            embeddings_np = embeddings.cpu().numpy()
+            embeddings_np = embeddings.float().cpu().numpy()
             del embeddings
+
+            # --- 1b. Zero-shot tags (SigLIP only): specific labels + their categories ---
+            batch_tags = tagging.tag_embeddings(embedding_model, embeddings_np)
 
             # --- 2. Image Description (Model Specific) ---
             final_descriptions = ["" for _ in range(len(batch_paths))]
@@ -285,6 +289,7 @@ def process_folder_parallel_caption(
                         "batch_size": batch_size,
                         "embedding_model": embedding_model_type,
                         "description_model": caption_model_type,
+                        "tags": json.dumps(batch_tags[idx]),
                     },
                 }
                 

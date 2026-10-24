@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -11,7 +12,8 @@ import subprocess
 
 import requests
 
-from find_similar import search_similar
+from find_similar import search_similar, invalidate_cache
+import tagging
 from persistence import PersistenceAPI # Import PersistenceAPI
 from caption_image import _get_image_paths, process_folder_parallel_caption
 from jobs import JobRunner
@@ -73,6 +75,7 @@ def get_images_from_db(query: str = None, image_id: str = None, top_k: int = 6, 
                 'id': result.get('image_id', ''),
                 'url': f"/images/{result.get('image_id', '')}",
                 'file_path': result.get('file_path', ''),
+                'tags': result.get('tags', []),
                 'score': f"{result.get('hybrid_score', 0):.4f}",
                 'captions': result.get('captions', []),
                 'description': result.get('description', '')
@@ -102,6 +105,7 @@ def search_form():
                     'id': img['image_id'],
                     'url': f"/images/{img['image_id']}",
                     'file_path': img.get('file_path', ''),
+                    'tags': [t for t, _ in tagging.confident_tags(json.loads(img.get('metadata', {}).get('tags') or '[]'))],
                     'score': '',
                     'captions': img['captions'],
                     'description': img.get('description', '')
@@ -140,7 +144,7 @@ def image_grid():
     except Exception:
         matches = 10
 
-    # Validate sensitivity parameter
+    # Validate sensitivity parameter (max distance: 0 = perfect match, 1 = unrelated)
     try:
         sensitivity = float(sensitivity) if sensitivity else 0.5
         if sensitivity <= 0 or sensitivity > 2:
@@ -201,6 +205,7 @@ def rebuild_index():
     if request.headers.get("X-Requested-By") != "image-converter":
         abort(403)
     api_siglip._rebuild_index()
+    invalidate_cache()
     return jsonify({"ok": True})
 
 
@@ -321,6 +326,7 @@ def index_start():
             indexed += 1
             job.progress(indexed, total, f"Indexed {indexed:,} of {total:,} images…")
             job.check_cancelled()
+        invalidate_cache()
         if indexed < total:
             job.error = (f"{total - indexed:,} image(s) were skipped: they couldn't be read "
                          "or the captioner returned no description.")

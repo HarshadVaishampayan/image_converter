@@ -11,12 +11,12 @@
       <div class="grow"><input type="text" name="query" value="{{ query or '' }}" placeholder="e.g. red car parked on a street" autofocus></div>
       <input type="hidden" name="image_id" value="">
       <label for="matches">Matches <input type="number" id="matches" name="matches" value="{{ matches or 10 }}" min="1" max="50"></label>
-      <label for="sensitivity">Sensitivity <input type="number" step="0.1" id="sensitivity" name="sensitivity" value="{{ sensitivity or 1.5 }}" min="0.1" max="2.0"></label>
+      <label for="sensitivity">Sensitivity <input type="number" step="0.05" id="sensitivity" name="sensitivity" value="{{ sensitivity or 0.5 }}" min="0.05" max="2.0"></label>
       <button type="submit" class="primary">Search</button>
       <button type="button" id="addIndex">＋ Add to index…</button>
       <button type="button" class="danger" id="rebuild">Clear index</button>
     </div>
-    <p class="hint" style="margin-top:8px">Sensitivity is the maximum distance (0 = identical, 2 = opposite); lower is stricter.</p>
+    <p class="hint" style="margin-top:8px">Sensitivity is the maximum distance to show: 0 = perfect match, 1 = unrelated. Lower is stricter.</p>
   </form>
   <div class="progress panel" id="idxProgress">
     <div class="bar" id="idxBar"><i></i></div><span id="idxMsg" class="count"></span><button id="idxCancel">Cancel</button>
@@ -43,6 +43,7 @@
         <div class="body">
           {% if image.captions %}<div class="caption">{{ image.captions[0] }}</div>
           {% elif image.description %}<div class="caption">{{ image.description }}</div>{% endif %}
+          {% if image.tags %}<div class="tags">{% for t in image.tags[:6] %}<span class="badge">{{ t }}</span>{% endfor %}</div>{% endif %}
         </div>
         <div class="foot">
           {% if image.score %}<span class="badge">Distance {{ image.score }}</span>{% else %}<span></span>{% endif %}

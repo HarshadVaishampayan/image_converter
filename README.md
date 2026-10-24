@@ -80,6 +80,7 @@ pip install -r requirements.txt
 Notes on dependency files
 
 - `v2/requirements.txt` is the single dependency list for v2 on every platform (torch's default wheels cover Apple MPS, Linux CUDA and CPU). Python 3.12–3.14.
+- **Tags & text search:** at index time each image is tagged zero-shot against `v2/taxonomy.py` (168 labels with parent categories), so a confident "cherry blossom" also counts as "flower" and "plant". Text searches combine SigLIP's calibrated image–text score, these tags and the description's words (plurals handled) into one 0–1 relevance; the shown distance is `1 − relevance`. Images indexed before tags existed are tagged on the fly from their stored embeddings. Extend the taxonomy to teach search new concepts — no re-index needed.
 - Embeddings use **SigLIP 2** (`google/siglip2-so400m-patch14-384`); Florence-2 captions use the native transformers port (`florence-community/Florence-2-large`). Indexes built with the older SigLIP model must be re-indexed (`image_cli.py purge` then `describe`).
 
 Configure model credentials (optional)

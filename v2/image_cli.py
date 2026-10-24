@@ -128,6 +128,8 @@ def search(image, query, embed_model, top_k, sensitivity):
             click.echo(f"Path: {result['file_path']}")
             click.echo(f"Score: {result['hybrid_score']:.4f} (Visual Dist: {result['score']:.4f})")
             click.echo(f"Captions: {result['captions']}")
+            if result.get('tags'):
+                click.echo(f"Tags: {', '.join(result['tags'])}")
             click.echo(f"Description: {result.get('description', '[MISSING]')}")
             click.echo("-" * 20)
                 
